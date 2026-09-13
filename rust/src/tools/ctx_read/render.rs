@@ -553,7 +553,19 @@ pub(crate) fn extract_line_range(content: &str, range_str: &str) -> String {
 
     for part in range_str.split(',') {
         let part = part.trim();
-        if let Some((start_s, end_s)) = part.split_once('-') {
+        if let Some(count_s) = part.strip_prefix('-') {
+            // #1759: `-N` is a tail window — the last N lines. This arm must
+            // precede `split_once('-')`, which would otherwise read `-3` as
+            // the span `""-"3"` and print the FIRST three lines instead.
+            if let Ok(count) = count_s.trim().parse::<usize>()
+                && count >= 1
+            {
+                let start = total.saturating_sub(count) + 1;
+                for i in start..=total {
+                    selected.push(format!("{i:>4}| {}", lines[i - 1]));
+                }
+            }
+        } else if let Some((start_s, end_s)) = part.split_once('-') {
             let start = start_s.trim().parse::<usize>().unwrap_or(1).max(1);
             let end = end_s.trim().parse::<usize>().unwrap_or(total).min(total);
             for i in start..=end {

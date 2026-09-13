@@ -132,6 +132,76 @@ fn gh775_ranged_response_starts_at_requested_line() {
     crate::test_env::remove_var("LEAN_CTX_SHOW_SAVINGS");
 }
 
+/// #1759: `lines:-N` — the mode the Bash-hook rewrite emits for `tail -N` —
+/// must return the LAST N lines. Before the fix it did not parse at all; and
+/// had the string reached the renderer, `split_once('-')` would have read `-3`
+/// as the span `""-"3"` and returned the FIRST three lines.
+#[test]
+fn gh1759_tail_window_returns_last_n_lines() {
+    let _iso = crate::core::data_dir::isolated_data_dir();
+    crate::test_env::set_var("LEAN_CTX_SHOW_SAVINGS", "0");
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = write_numbered_file(dir.path(), "tail.ts", 40);
+    let mut cache = SessionCache::new();
+
+    let tail = handle_fresh_with_task_resolved(&mut cache, &p, "lines:-3", CrpMode::Off, None);
+    let body_lines: Vec<&str> = tail
+        .content
+        .lines()
+        .filter(|l| l.contains("| line "))
+        .collect();
+    assert_eq!(
+        body_lines.len(),
+        3,
+        "lines:-3 must return exactly 3 lines, got {}",
+        body_lines.len()
+    );
+    assert!(
+        body_lines[0].contains("38| line 38"),
+        "the window must start at line 38, got: {}",
+        body_lines[0]
+    );
+    assert!(
+        body_lines[2].contains("40| line 40"),
+        "the window must end at the last line, got: {}",
+        body_lines[2]
+    );
+    assert!(
+        !tail.content.contains("invalid read mode"),
+        "the tail form must parse: {}",
+        tail.content
+    );
+
+    // A window larger than the file is the whole file, not an error.
+    let all = handle_fresh_with_task_resolved(&mut cache, &p, "lines:-100", CrpMode::Off, None);
+    assert_eq!(
+        all.content
+            .lines()
+            .filter(|l| l.contains("| line "))
+            .count(),
+        40
+    );
+
+    crate::test_env::remove_var("LEAN_CTX_SHOW_SAVINGS");
+}
+
+#[test]
+fn gh1759_tail_part_inside_multi_select() {
+    // The renderer resolves `-N` parts of a comma multi-select the same way.
+    let content = (1..=10)
+        .map(|i| format!("line {i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let out = crate::tools::ctx_read::render::extract_line_range(&content, "1-2,-2");
+    let picked: Vec<&str> = out.lines().collect();
+    assert_eq!(picked.len(), 4, "{out}");
+    assert!(picked[0].contains("1| line 1"));
+    assert!(picked[1].contains("2| line 2"));
+    assert!(picked[2].contains("9| line 9"));
+    assert!(picked[3].contains("10| line 10"));
+}
+
 #[test]
 fn gh775_cold_ranged_read_returns_only_window() {
     let _iso = crate::core::data_dir::isolated_data_dir();

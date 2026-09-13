@@ -57,8 +57,9 @@ mod tests;
 use codex::{codex_allow_output, codex_deny_output, codex_rewrite_output};
 #[cfg(test)]
 use file_rewrite::{
-    build_rewrite_compound, is_outside_project_path, is_rewritable, parse_head_tail_args,
-    rewrite_candidate, rewrite_file_read_command, rewrite_skip_reason, wrap_single_command,
+    LineCount, build_rewrite_compound, is_outside_project_path, is_rewritable,
+    parse_head_tail_args, rewrite_candidate, rewrite_file_read_command, rewrite_skip_reason,
+    wrap_single_command,
 };
 #[cfg(test)]
 use redirect::{

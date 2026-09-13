@@ -107,6 +107,14 @@ pub(crate) enum ReadMode {
     /// without becoming `5-5`. Validation is what this type owes its callers;
     /// interpretation belongs to the renderer.
     LinesMulti(String),
+    /// Tail window — `"lines:-N"`, the last `N` lines of the file (#1759).
+    ///
+    /// This is what the Bash-hook rewrite turns `tail -N file` into. It used
+    /// to be rejected as malformed, so every rewritten `tail` failed with a
+    /// parse error instead of returning the last N lines. Like `LinesMulti`
+    /// the window is resolved by `render::extract_line_range` — it needs the
+    /// file's line count — so only the count is carried here.
+    LinesTail(u32),
     /// Target-density compression — `"density:0.NN"`.
     Density(f64),
 }
@@ -141,8 +149,8 @@ impl ParseModeError {
     pub(crate) fn user_message(&self) -> String {
         match self {
             ParseModeError::Malformed(s) if s.starts_with("lines:") => format!(
-                "invalid read mode \"{s}\": expected lines:START-END (dash), e.g. lines:72-92 \
-                 (or a comma multi-select like lines:5,10-20)"
+                "invalid read mode \"{s}\": expected lines:START-END (dash), e.g. lines:72-92, \
+                 lines:-N for the last N lines, or a comma multi-select like lines:5,10-20"
             ),
             ParseModeError::Malformed(s) if s.starts_with("anchored:") => format!(
                 "invalid read mode \"{s}\": expected anchored:START-END (dash), e.g. anchored:72-92"
@@ -152,7 +160,8 @@ impl ParseModeError {
             }
             ParseModeError::Malformed(s) | ParseModeError::Unknown(s) => format!(
                 "invalid read mode \"{s}\": expected one of full, signatures, map, cognitive, mdl, \
-                 auto, raw, anchored, reference, diff, lines:N-M, anchored:N-M, density:0.NN"
+                 auto, raw, anchored, reference, diff, lines:N-M, lines:-N, anchored:N-M, \
+                 density:0.NN"
             ),
         }
     }
@@ -173,7 +182,12 @@ fn parse_line_multi(payload: &str) -> Result<String, ParseModeError> {
     let malformed = || ParseModeError::Malformed(format!("lines:{payload}"));
     for part in payload.split(',') {
         let part = part.trim();
-        if let Some((start, end)) = part.split_once('-') {
+        if let Some(count) = part.strip_prefix('-') {
+            // #1759: a `-N` part is a tail window (the last N lines). It must
+            // be recognised before `split_once('-')`, which would otherwise
+            // read `-3` as the span `""-"3"` and reject it.
+            parse_tail_count(count).ok_or_else(malformed)?;
+        } else if let Some((start, end)) = part.split_once('-') {
             start.trim().parse::<u32>().map_err(|_| malformed())?;
             end.trim().parse::<u32>().map_err(|_| malformed())?;
         } else {
@@ -181,6 +195,14 @@ fn parse_line_multi(payload: &str) -> Result<String, ParseModeError> {
         }
     }
     Ok(payload.to_string())
+}
+
+/// Parse the `N` of a tail window (`lines:-N`, #1759).
+///
+/// Zero is rejected: "the last 0 lines" is never what a caller meant, and a
+/// rewritten `tail -0` would otherwise silently return an empty window.
+fn parse_tail_count(payload: &str) -> Option<u32> {
+    payload.trim().parse::<u32>().ok().filter(|n| *n >= 1)
 }
 
 /// Parse the payload of a line-range mode (`"5-10"`, `"5-999999"`, or a bare
@@ -224,6 +246,13 @@ impl FromStr for ReadMode {
                     // #971: a comma payload is a multi-select, not a span.
                     if payload.contains(',') {
                         ReadMode::LinesMulti(parse_line_multi(payload)?)
+                    } else if let Some(count) = payload.trim().strip_prefix('-') {
+                        // #1759: `lines:-N` is the last N lines — the mode the
+                        // Bash-hook rewrite emits for `tail -N file`.
+                        ReadMode::LinesTail(
+                            parse_tail_count(count)
+                                .ok_or_else(|| ParseModeError::Malformed(other.to_string()))?,
+                        )
                     } else {
                         ReadMode::Lines(parse_line_range(payload, other)?)
                     }
@@ -263,6 +292,7 @@ impl fmt::Display for ReadMode {
             ReadMode::Anchored(Some(range)) => return write!(f, "anchored:{range}"),
             ReadMode::Lines(range) => return write!(f, "lines:{range}"),
             ReadMode::LinesMulti(payload) => return write!(f, "lines:{payload}"),
+            ReadMode::LinesTail(count) => return write!(f, "lines:-{count}"),
             // Matches the handler's historical `format!("density:{:.2}", …)`.
             ReadMode::Density(target) => return write!(f, "density:{target:.2}"),
         };
@@ -287,6 +317,7 @@ impl ReadMode {
             self,
             ReadMode::Lines(_)
                 | ReadMode::LinesMulti(_)
+                | ReadMode::LinesTail(_)
                 | ReadMode::Reference
                 | ReadMode::Diff
                 | ReadMode::Raw
@@ -342,7 +373,11 @@ impl ReadMode {
     pub(crate) fn is_precise_pinned_read(&self) -> bool {
         matches!(
             self,
-            ReadMode::Diff | ReadMode::Lines(_) | ReadMode::LinesMulti(_) | ReadMode::Anchored(_)
+            ReadMode::Diff
+                | ReadMode::Lines(_)
+                | ReadMode::LinesMulti(_)
+                | ReadMode::LinesTail(_)
+                | ReadMode::Anchored(_)
         )
     }
 }
@@ -369,6 +404,7 @@ mod tests {
         "diff",
         "lines:5-10",
         "lines:5-999999",
+        "lines:-3",
         "density:0.40",
     ];
 
@@ -566,6 +602,68 @@ mod tests {
                 "'{mode}' must not parse as a valid multi-select"
             );
         }
+    }
+
+    // --- #1759: tail window ---
+
+    #[test]
+    fn tail_window_parses_and_round_trips() {
+        // The exact mode the Bash-hook rewrite emits for `tail -3 file`. It was
+        // Malformed before, so the rewrite failed on every invocation.
+        assert_eq!(
+            "lines:-3".parse::<ReadMode>().unwrap(),
+            ReadMode::LinesTail(3)
+        );
+        assert_eq!(
+            "lines:-3".parse::<ReadMode>().unwrap().to_string(),
+            "lines:-3"
+        );
+        assert_eq!(
+            "lines:-250".parse::<ReadMode>().unwrap(),
+            ReadMode::LinesTail(250)
+        );
+    }
+
+    #[test]
+    fn tail_window_is_pinned_and_never_capped() {
+        // Same contract as `lines:N-M`: the caller asked for an exact window and
+        // must get exactly that back (#843), and a selection view is never
+        // raw-capped (#361).
+        let tail: ReadMode = "lines:-3".parse().unwrap();
+        let single: ReadMode = "lines:1-3".parse().unwrap();
+        assert!(tail.is_precise_pinned_read());
+        assert!(!tail.allows_raw_cap());
+        assert_eq!(tail.counts_as_compressed(), single.counts_as_compressed());
+        assert_eq!(tail.is_lossy_summary(), single.is_lossy_summary());
+        assert_eq!(
+            tail.is_compressed_cacheable(),
+            single.is_compressed_cacheable()
+        );
+    }
+
+    #[test]
+    fn tail_window_rejects_zero_and_garbage() {
+        for mode in ["lines:-0", "lines:-", "lines:-x", "lines:--3", "lines:-3-5"] {
+            let err = mode
+                .parse::<ReadMode>()
+                .expect_err("a malformed tail window must not parse");
+            assert_eq!(err, ParseModeError::Malformed(mode.to_string()), "{mode}");
+            assert!(
+                err.user_message().contains("lines:-N"),
+                "the message must name the tail form for '{mode}'"
+            );
+        }
+    }
+
+    #[test]
+    fn tail_window_is_accepted_inside_a_multi_select() {
+        // A `-N` part goes through the same validation as `lines:-N`; it is
+        // kept verbatim and interpreted by the renderer like every other part.
+        assert_eq!(
+            "lines:1-3,-2".parse::<ReadMode>().unwrap(),
+            ReadMode::LinesMulti("1-3,-2".to_string())
+        );
+        assert!("lines:1-3,-0".parse::<ReadMode>().is_err());
     }
 
     #[test]

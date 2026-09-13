@@ -437,22 +437,99 @@ fn is_outside_project_path_tests() {
 #[test]
 fn parse_head_tail_args_basic() {
     let (n, path) = parse_head_tail_args(&["-n", "20", "file.rs"]);
-    assert_eq!(n, Some(20));
+    assert_eq!(n, Some(LineCount::Plain(20)));
     assert_eq!(path, Some("file.rs"));
 }
 
 #[test]
 fn parse_head_tail_args_combined() {
     let (n, path) = parse_head_tail_args(&["-n20", "file.rs"]);
-    assert_eq!(n, Some(20));
+    assert_eq!(n, Some(LineCount::Plain(20)));
     assert_eq!(path, Some("file.rs"));
 }
 
 #[test]
 fn parse_head_tail_args_short_flag() {
     let (n, path) = parse_head_tail_args(&["-50", "file.rs"]);
-    assert_eq!(n, Some(50));
+    assert_eq!(n, Some(LineCount::Plain(50)));
     assert_eq!(path, Some("file.rs"));
+}
+
+#[test]
+fn parse_head_tail_args_keeps_the_sign() {
+    // #1759: `+N` and `-N` are different windows; the sign must survive.
+    assert_eq!(
+        parse_head_tail_args(&["-n", "+5", "f"]).0,
+        Some(LineCount::Plus(5))
+    );
+    assert_eq!(
+        parse_head_tail_args(&["-n+5", "f"]).0,
+        Some(LineCount::Plus(5))
+    );
+    assert_eq!(
+        parse_head_tail_args(&["+5", "f"]).0,
+        Some(LineCount::Plus(5))
+    );
+    assert_eq!(
+        parse_head_tail_args(&["-n", "-5", "f"]).0,
+        Some(LineCount::Minus(5))
+    );
+    assert_eq!(
+        parse_head_tail_args(&["-n-5", "f"]).0,
+        Some(LineCount::Minus(5))
+    );
+}
+
+#[test]
+fn file_read_rewrite_tail_from_line() {
+    // #1759: `tail -n +N` reads FROM line N. `"+5".parse::<usize>()` is `Ok(5)`,
+    // so this used to become `lines:-5` — the last five lines — which only
+    // failed loudly because `lines:-N` itself did not parse yet.
+    for cmd in [
+        "tail -n +5 src/main.rs",
+        "tail -n+5 src/main.rs",
+        "tail +5 src/main.rs",
+    ] {
+        assert_eq!(
+            rewrite_file_read_command(cmd, "lean-ctx"),
+            Some("lean-ctx read src/main.rs -m lines:5".to_string()),
+            "{cmd}"
+        );
+    }
+    // GNU `tail -n -5` is the same window as `tail -n 5`.
+    assert_eq!(
+        rewrite_file_read_command("tail -n -5 src/main.rs", "lean-ctx"),
+        Some("lean-ctx read src/main.rs -m lines:-5".to_string())
+    );
+}
+
+#[test]
+fn file_read_rewrite_head_declines_signed_counts() {
+    // `head -n -5` prints everything but the last five lines; there is no
+    // `lines:` window for that, so it must pass through rather than rewrite.
+    assert_eq!(
+        rewrite_file_read_command("head -n -5 src/main.rs", "lean-ctx"),
+        None
+    );
+    assert_eq!(
+        rewrite_file_read_command("head -n +5 src/main.rs", "lean-ctx"),
+        None
+    );
+}
+
+#[test]
+fn file_read_rewrite_tail_follow_passes_through() {
+    // A following tail streams; a static window read can never replace it.
+    for cmd in [
+        "tail -f src/main.rs",
+        "tail -F src/main.rs",
+        "tail --follow src/main.rs",
+        "tail --follow=name src/main.rs",
+        "tail -n 20 -f src/main.rs",
+        "tail -fn 20 src/main.rs",
+    ] {
+        assert_eq!(rewrite_file_read_command(cmd, "lean-ctx"), None, "{cmd}");
+    }
 }
 
 #[test]
