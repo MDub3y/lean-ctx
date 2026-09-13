@@ -355,11 +355,16 @@ fn match_agent_name(cli_key: &str, target_name: &str) -> bool {
 /// Check if the rules file for a given MCP client is up-to-date.
 pub fn check_rules_freshness(client_name: &str) -> Option<String> {
     let home = dirs::home_dir()?;
-    let injection = crate::core::config::Config::load().rules_injection_effective();
-    if injection == crate::core::config::RulesInjection::Off {
+    check_rules_freshness_at_home(client_name, &home)
+}
+
+fn check_rules_freshness_at_home(client_name: &str, home: &std::path::Path) -> Option<String> {
+    let cfg = crate::core::config::Config::load();
+    if cfg.declines_rule_steering() {
         return None;
     }
-    let targets = build_rules_targets(&home, injection);
+    let injection = cfg.rules_injection_effective();
+    let targets = build_rules_targets(home, injection);
 
     let matched: Vec<&RulesTarget> = targets
         .iter()

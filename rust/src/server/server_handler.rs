@@ -179,7 +179,7 @@ impl ServerHandler for LeanCtxServer {
             );
             if maintenance.is_some() {
                 if let Some(home) = dirs::home_dir() {
-                    let _ = crate::rules_inject::inject_all_rules(&home);
+                    startup_rule_maintenance_at_home(&home);
                     // The on-demand SKILL.md belongs to the same steering surface
                     // as the rules block: the session-start heal writes rules for
                     // every detected client, so a fresh machine that never ran
@@ -701,10 +701,114 @@ impl ServerHandler for LeanCtxServer {
     }
 }
 
+fn startup_rule_maintenance_at_home(home: &std::path::Path) {
+    let cfg = crate::core::config::Config::load();
+    if cfg.declines_rule_steering() {
+        return;
+    }
+    let _ = crate::rules_inject::inject_all_rules(home);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_maintenance_respects_explicit_auto_inject_false() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
 
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        std::fs::write(
+            home.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = false\n",
+        )
+        .unwrap();
+
+        crate::test_env::set_var("LEAN_CTX_CONFIG_DIR", &config_dir);
+
+        startup_rule_maintenance_at_home(&home);
+
+        crate::test_env::remove_var("LEAN_CTX_CONFIG_DIR");
+
+        let rules = home.join(".cursor/rules/lean-ctx.mdc");
+
+        assert!(
+            !rules.exists(),
+            "startup maintenance must not write Cursor rules when setup.auto_inject_rules=false"
+        );
+    }
+
+    #[test]
+    fn automatic_rule_maintenance_allows_default_startup_write() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        std::fs::write(
+            home.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+
+        crate::test_env::set_var("LEAN_CTX_CONFIG_DIR", &config_dir);
+
+        startup_rule_maintenance_at_home(&home);
+
+        crate::test_env::remove_var("LEAN_CTX_CONFIG_DIR");
+
+        assert!(
+            home.join(".cursor/rules/lean-ctx.mdc").exists(),
+            "default auto_inject_rules=None must preserve zero-config startup rule maintenance"
+        );
+    }
+
+    #[test]
+    fn automatic_rule_maintenance_allows_explicit_true_startup_write() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        std::fs::write(
+            home.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = true\n",
+        )
+        .unwrap();
+
+        crate::test_env::set_var("LEAN_CTX_CONFIG_DIR", &config_dir);
+
+        startup_rule_maintenance_at_home(&home);
+
+        crate::test_env::remove_var("LEAN_CTX_CONFIG_DIR");
+
+        assert!(
+            home.join(".cursor/rules/lean-ctx.mdc").exists(),
+            "explicit auto_inject_rules=true must preserve startup rule maintenance"
+        );
+    }
     /// lean-ctx emits `notifications/tools/list_changed` whenever a tool call
     /// mutates the dynamic tool set. The capability MUST be advertised on every
     /// client surface (resources/prompts on or off) — otherwise a strict client

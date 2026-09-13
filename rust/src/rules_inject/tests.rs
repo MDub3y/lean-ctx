@@ -592,3 +592,118 @@ fn inject_result_tracks_backed_up_files() {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("bak"))
     );
 }
+
+#[test]
+fn explicit_auto_inject_false_suppresses_freshness_self_heal() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[setup]\nauto_inject_rules = false\n",
+    )
+    .unwrap();
+
+    crate::test_env::set_var("LEAN_CTX_CONFIG_DIR", &config_dir);
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    crate::test_env::remove_var("LEAN_CTX_CONFIG_DIR");
+
+    assert!(
+        freshness.is_none(),
+        "explicit setup.auto_inject_rules=false must suppress automatic stale-rule self-heal, got: {freshness:?}"
+    );
+}
+
+#[test]
+fn automatic_rule_maintenance_allows_default_freshness_check() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    crate::test_env::set_var("LEAN_CTX_CONFIG_DIR", &config_dir);
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    crate::test_env::remove_var("LEAN_CTX_CONFIG_DIR");
+
+    assert!(
+        freshness.is_some(),
+        "default auto_inject_rules=None must preserve automatic freshness detection"
+    );
+}
+
+#[test]
+fn automatic_rule_maintenance_allows_explicit_true_freshness_check() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[setup]\nauto_inject_rules = true\n",
+    )
+    .unwrap();
+
+    crate::test_env::set_var("LEAN_CTX_CONFIG_DIR", &config_dir);
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    crate::test_env::remove_var("LEAN_CTX_CONFIG_DIR");
+
+    assert!(
+        freshness.is_some(),
+        "explicit auto_inject_rules=true must preserve automatic freshness detection"
+    );
+}
