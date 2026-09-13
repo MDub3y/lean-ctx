@@ -11,13 +11,11 @@ use super::persistence::{
 use super::{AgentEntry, AgentRegistry, AgentStatus, LogicalSessionPresence, ScratchpadEntry};
 use crate::core::a2a::message::{MessagePriority, PrivacyLevel};
 
+mod admission;
 mod resource_broker;
 #[cfg(test)]
 use resource_broker::active_worker_lease_seconds;
-use resource_broker::{
-    consumes_worker_capacity, ensure_worker_capacity, has_active_worker_lease,
-    max_concurrent_mutating_workers, max_concurrent_workers, role_can_mutate,
-};
+use resource_broker::capacity_profile;
 
 const LOGICAL_SESSION_SOURCE_MAX_BYTES: usize = 64;
 const LOGICAL_SESSION_WORKSPACE_MAX_BYTES: usize = 4096;
@@ -111,19 +109,55 @@ impl AgentRegistry {
         let identity = crate::ipc::process::identity(pid)
             .ok_or_else(|| format!("cannot establish immutable process identity for PID {pid}"))?;
         let agent_id = format!("{}-{}-{}", agent_type, pid, generate_short_id());
+        let compatibility_identities = ProcessIdentityIndex::load();
+        let now = Utc::now();
 
-        if let Some(existing) = self.agents.iter_mut().find(|a| {
+        if let Some(index) = self.agents.iter().position(|a| {
             a.pid == pid
                 && a.status != AgentStatus::Finished
                 && a.process_identity.as_ref() == Some(&identity)
         }) {
-            existing.last_active = Utc::now();
+            let existing_role = self.agents[index].role.clone();
+            // #1766: the fail-closed presence retry registers as
+            // `context-engine`. That placeholder never replaces a role the
+            // process already holds — it silently moved a `reviewer` (or a
+            // `coder`) out of worker-capacity accounting. An explicit role
+            // still replaces the placeholder: that is the `initialize`
+            // upgrade from the construction-time presence.
+            let next_role = match role {
+                Some("context-engine") if existing_role.is_some() => existing_role.clone(),
+                Some(explicit) => Some(explicit.to_string()),
+                None => existing_role.clone(),
+            };
+            // #1765: an update that starts taking a lease or a mutating slot
+            // passes the caps exactly like a fresh registration. Before, the
+            // placeholder was wrongly subject to the caps and this upgrade was
+            // never checked at all — the mutating cap only held by accident.
+            let was = capacity_profile(&self.agents[index].agent_type, existing_role.as_deref());
+            let will = capacity_profile(agent_type, next_role.as_deref());
+            if (will.0 && !was.0) || (will.1 && !was.1) {
+                let own_id = self.agents[index].agent_id.clone();
+                self.ensure_registration_capacity(
+                    agent_type,
+                    next_role.as_deref(),
+                    project_root,
+                    Some(&own_id),
+                    &compatibility_identities,
+                    now,
+                )?;
+            }
+            let existing = &mut self.agents[index];
+            existing.last_active = now;
             existing.status = AgentStatus::Active;
             existing.agent_type = agent_type.to_string();
             existing.project_root = project_root.to_string();
-            if let Some(r) = role {
-                existing.role = Some(r.to_string());
+            if existing.role != next_role {
+                // A status note describes the role it was written for — the
+                // read-only admission's "while registering as coder" must not
+                // outlive the upgrade to `coder` itself.
+                existing.status_message = None;
             }
+            existing.role = next_role;
             return Ok(existing.agent_id.clone());
         }
 
@@ -140,55 +174,14 @@ impl AgentRegistry {
                 Some("superseded by a different process identity".to_string());
         }
 
-        let compatibility_identities = ProcessIdentityIndex::load();
-        let now = Utc::now();
-        let active_machine_wide = self
-            .agents
-            .iter()
-            .filter(|agent| {
-                consumes_worker_capacity(agent)
-                    && has_active_worker_lease(agent, now)
-                    && process_identity_matches(agent, &compatibility_identities)
-            })
-            .count();
-        let limit = max_concurrent_workers();
-        ensure_worker_capacity(active_machine_wide, limit, project_root)?;
-
-        if role_can_mutate(role) {
-            let active_mutating = self
-                .agents
-                .iter()
-                .filter(|agent| {
-                    consumes_worker_capacity(agent)
-                        && role_can_mutate(agent.role.as_deref())
-                        && has_active_worker_lease(agent, now)
-                        && process_identity_matches(agent, &compatibility_identities)
-                })
-                .count();
-            let limit = max_concurrent_mutating_workers();
-            if active_mutating >= limit {
-                return Err(format!(
-                    "machine-wide mutating-agent capacity reached: {active_mutating}/{limit}; queue this task or use an explicitly read-only role"
-                ));
-            }
-        }
-
-        if !(agent_type == "mcp" && role == Some("context-engine"))
-            && let Some(role) = role.map(str::trim).filter(|role| !role.is_empty())
-            && self.agents.iter().any(|agent| {
-                agent.project_root == project_root
-                    && agent
-                        .role
-                        .as_deref()
-                        .is_some_and(|active| active.eq_ignore_ascii_case(role))
-                    && has_active_worker_lease(agent, now)
-                    && process_identity_matches(agent, &compatibility_identities)
-            })
-        {
-            return Err(format!(
-                "duplicate active role rejected for {project_root}: {role}; reuse or finish the existing worker"
-            ));
-        }
+        self.ensure_registration_capacity(
+            agent_type,
+            role,
+            project_root,
+            None,
+            &compatibility_identities,
+            now,
+        )?;
 
         self.agents.push(AgentEntry {
             agent_id: agent_id.clone(),
@@ -206,15 +199,6 @@ impl AgentRegistry {
         self.updated_at = Utc::now();
         crate::core::events::emit_agent_action(&agent_id, "register", None);
         Ok(agent_id)
-    }
-
-    /// Atomically registers this MCP process in the shared on-disk registry.
-    pub(crate) fn register_mcp_process(project_root: &str) -> Result<String, String> {
-        mutate_persistent(|registry| {
-            registry.cleanup_stale(presence_ttl());
-            registry.register("mcp", Some("context-engine"), project_root)
-        })
-        .and_then(|result| result)
     }
 
     /// Atomically refreshes a registered MCP process heartbeat.
@@ -1143,8 +1127,8 @@ mod tests {
 
     #[test]
     fn resource_broker_capacity_fails_closed_at_the_hard_limit() {
-        assert!(super::ensure_worker_capacity(14, 15, "/project").is_ok());
-        let error = super::ensure_worker_capacity(15, 15, "/project")
+        assert!(super::resource_broker::ensure_worker_capacity(14, 15, "/project").is_ok());
+        let error = super::resource_broker::ensure_worker_capacity(15, 15, "/project")
             .expect_err("a sixteenth worker must be rejected");
         assert!(error.contains("15/15"));
     }
@@ -1154,10 +1138,10 @@ mod tests {
         let mut agent = test_entry("mcp", "/project", std::process::id());
         agent.agent_type = "mcp".to_string();
         agent.role = Some("context-engine".to_string());
-        assert!(!super::consumes_worker_capacity(&agent));
+        assert!(!super::resource_broker::consumes_worker_capacity(&agent));
 
         agent.role = Some("implementer".to_string());
-        assert!(super::consumes_worker_capacity(&agent));
+        assert!(super::resource_broker::consumes_worker_capacity(&agent));
     }
 
     #[test]
@@ -1168,25 +1152,37 @@ mod tests {
             "API research",
             "performance audit",
         ] {
-            assert!(!super::role_can_mutate(Some(role)), "{role}");
+            assert!(
+                !super::resource_broker::role_can_mutate(Some(role)),
+                "{role}"
+            );
         }
         for role in [None, Some("implementer"), Some("integration lead")] {
-            assert!(super::role_can_mutate(role));
+            assert!(super::resource_broker::role_can_mutate(role));
         }
     }
 
     #[test]
     fn resource_broker_idle_or_expired_workers_release_capacity() {
         let mut agent = test_entry("worker", "/project", std::process::id());
-        assert!(super::has_active_worker_lease(&agent, Utc::now()));
+        assert!(super::resource_broker::has_active_worker_lease(
+            &agent,
+            Utc::now()
+        ));
 
         agent.status = AgentStatus::Idle;
-        assert!(!super::has_active_worker_lease(&agent, Utc::now()));
+        assert!(!super::resource_broker::has_active_worker_lease(
+            &agent,
+            Utc::now()
+        ));
 
         agent.status = AgentStatus::Active;
         agent.last_active =
             Utc::now() - chrono::Duration::seconds(super::active_worker_lease_seconds() + 1);
-        assert!(!super::has_active_worker_lease(&agent, Utc::now()));
+        assert!(!super::resource_broker::has_active_worker_lease(
+            &agent,
+            Utc::now()
+        ));
     }
 
     /// Regression: concurrent load-mutate-save cycles must not silently drop

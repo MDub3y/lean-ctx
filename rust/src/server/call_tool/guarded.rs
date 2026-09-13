@@ -228,6 +228,20 @@ impl LeanCtxServer {
             }
         }
 
+        // #1765: a session admitted read-only — the machine-wide mutating cap
+        // was full when it registered — serves the plan-mode (read-only) tool
+        // set as-is and retries its real role before the first mutating call.
+        if self
+            .presence_read_only
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && !crate::core::editor_registry::plan_mode::plan_mode_tools().contains(&guard_name)
+            && let Err(refusal) = self.try_upgrade_presence(guard_name).await
+        {
+            let result = CallToolResult::error(vec![ContentBlock::text(refusal)]);
+            finish_decision_loop(decision_context.as_ref(), args, &result);
+            return Ok(result);
+        }
+
         if let Some(blocked) = Self::guard_egress(guard_name, guard_args) {
             finish_decision_loop(decision_context.as_ref(), args, &blocked);
             return Ok(blocked);

@@ -164,6 +164,9 @@ impl ServerHandler for LeanCtxServer {
         let agent_name = name.clone();
         let agent_root = effective_root.clone().unwrap_or_default();
         let agent_id_handle = self.agent_id.clone();
+        let presence_agent_id_handle = self.presence_agent_id.clone();
+        let presence_role_handle = self.presence_role.clone();
+        let presence_read_only_handle = self.presence_read_only.clone();
         tokio::task::spawn_blocking(move || {
             if std::env::var("LEAN_CTX_HEADLESS").is_ok() {
                 return;
@@ -220,14 +223,58 @@ impl ServerHandler for LeanCtxServer {
                 let effective_role = env_role.as_deref().or(heuristic_role).unwrap_or("coder");
 
                 let _ = crate::core::roles::set_active_role_with_source(effective_role, true);
+                // #1766: remember the resolved role so the fail-closed presence
+                // retry re-registers with it, not the `context-engine` placeholder.
+                if let Ok(mut guard) = presence_role_handle.try_write() {
+                    *guard = Some(effective_role.to_string());
+                }
 
-                let id = crate::core::agents::AgentRegistry::mutate_locked(|registry| {
+                let registration = crate::core::agents::AgentRegistry::mutate_locked(|registry| {
                     registry.cleanup_stale(24);
                     registry.register("mcp", Some(effective_role), &agent_root)
                 })
-                .and_then(|(_, id)| id)
-                .ok();
-                if let (Some(id), Ok(mut guard)) = (id, agent_id_handle.try_write()) {
+                .and_then(|(_, id)| id);
+                let id = match registration {
+                    Ok(id) => {
+                        presence_read_only_handle
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        Some(id)
+                    }
+                    // #1765: over the mutating cap the session is admitted
+                    // read-only instead of losing every tool — reads included —
+                    // until an unrelated session's lease lapses.
+                    Err(error)
+                        if crate::core::agents::AgentRegistry::is_mutating_capacity_error(
+                            &error,
+                        ) =>
+                    {
+                        tracing::warn!(
+                            "lean-ctx: {error}; admitting {effective_role} session read-only"
+                        );
+                        match crate::core::agents::AgentRegistry::admit_read_only_presence(
+                            &agent_root,
+                            effective_role,
+                        ) {
+                            Ok(id) => {
+                                presence_read_only_handle
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                                Some(id)
+                            }
+                            Err(error) => {
+                                tracing::warn!("lean-ctx: read-only admission failed: {error}");
+                                None
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("lean-ctx: agent registration failed: {error}");
+                        None
+                    }
+                };
+                if let (Some(id), Ok(mut guard)) = (id.as_ref(), agent_id_handle.try_write()) {
+                    *guard = Some(id.clone());
+                }
+                if let (Some(id), Ok(mut guard)) = (id, presence_agent_id_handle.try_write()) {
                     *guard = Some(id);
                 }
             }
