@@ -340,30 +340,49 @@ fn codex_chatgpt_set(on: bool, port: u16) {
         println!("\x1b[31m✗\x1b[0m Could not persist [proxy] codex_chatgpt_proxy: {e}");
         return;
     }
-    if on {
-        println!(
-            "\x1b[32m✓\x1b[0m Codex ChatGPT proxy routing \x1b[1menabled\x1b[0m: [proxy] codex_chatgpt_proxy = true"
-        );
-    } else {
-        println!(
-            "\x1b[32m✓\x1b[0m Codex ChatGPT proxy routing \x1b[1mdisabled\x1b[0m: [proxy] codex_chatgpt_proxy = false"
-        );
-    }
+    // #1775: the opt-in genuinely is persisted, so report exactly that and
+    // nothing more. The old green line claimed routing was "enabled" before the
+    // installer had even run, so a write skipped against an unreachable proxy
+    // still read as success — the user saw a checkmark for something that had
+    // not happened.
+    let state = if on { "true" } else { "false" };
+    println!("\x1b[32m✓\x1b[0m Opt-in saved: [proxy] codex_chatgpt_proxy = \x1b[1m{state}\x1b[0m");
 
-    // Apply now: writes (on) or strips (off) Codex's top-level `chatgpt_base_url`.
+    // Apply now: writes (on) or strips (off) Codex's proxy entries.
     let home = dirs::home_dir().unwrap_or_default();
-    crate::proxy_setup::install_codex_env(&home, port, false);
-
-    if on && !crate::proxy_setup::is_proxy_reachable(port) {
-        println!();
-        println!(
-            "  \x1b[33m⚠ Proxy not running on port {port}\x1b[0m — Codex can't route until it is up."
-        );
-        println!("    Start it:  lean-ctx proxy enable        (managed autostart service)");
-        println!("    or:        lean-ctx proxy start --port={port}");
-        println!(
-            "  \x1b[2mThe opt-in is saved, so setup writes Codex's chatgpt_base_url once the proxy is reachable.\x1b[0m"
-        );
+    match crate::proxy_setup::install_codex_env(&home, port, false) {
+        crate::proxy_setup::CodexEnvOutcome::Written => {
+            let effect = if on {
+                "routed through lean-ctx"
+            } else {
+                "back to native"
+            };
+            println!("\x1b[32m✓\x1b[0m Codex config updated — Codex is now {effect}.");
+        }
+        crate::proxy_setup::CodexEnvOutcome::AlreadyConfigured => {
+            println!("\x1b[32m✓\x1b[0m Codex config was already in the requested state.");
+        }
+        crate::proxy_setup::CodexEnvOutcome::LeftNative => {
+            println!("\x1b[32m✓\x1b[0m Codex left native — nothing to write.");
+        }
+        crate::proxy_setup::CodexEnvOutcome::SkippedProxyDown => {
+            println!();
+            println!(
+                "  \x1b[33m⚠ Codex config NOT written\x1b[0m — nothing is serving port {port}."
+            );
+            println!("    The opt-in is saved, but Codex is not routed yet. Start the proxy,");
+            println!("    then run this command again — both steps are needed:");
+            println!("      lean-ctx proxy start --port={port}");
+            println!(
+                "      lean-ctx proxy codex-chatgpt {}",
+                if on { "on" } else { "off" }
+            );
+        }
+        crate::proxy_setup::CodexEnvOutcome::NoConfigDir => {
+            println!();
+            println!("  \x1b[33m⚠ Codex config NOT written\x1b[0m — no Codex config directory.");
+            println!("    Run `codex login` once to create it, then run this command again.");
+        }
     }
 }
 
@@ -604,19 +623,52 @@ pub(crate) fn cmd_proxy(rest: &[String]) {
                 bridge_codex_chatgpt_optin();
 
                 let port = crate::proxy_setup::default_port();
-                if !crate::proxy_autostart::install(port, false) {
-                    eprintln!(
-                        "\x1b[31m✗\x1b[0m Proxy enable failed; managed service did not acquire port {port}."
-                    );
-                    std::process::exit(1);
+                // #1773: the managed service and the client wiring are separate
+                // concerns, and coupling them stranded every Windows user.
+                // `proxy_autostart::install` has backends for macOS (launchd) and
+                // Linux (systemd) only, so on Windows it always returns false —
+                // the old `exit(1)` fired here and `install_proxy_env_unchecked`
+                // below was unreachable. The error then pointed at
+                // `lean-ctx proxy start`, which wires no client either, so the
+                // documented path could never produce a working setup.
+                //
+                // Wire first, report second. A manually started proxy is a
+                // perfectly good outcome on a platform without autostart.
+                let autostart_ok = crate::proxy_autostart::install(port, false);
+                if autostart_ok {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(500));
 
                 let home = dirs::home_dir().unwrap_or_default();
                 crate::proxy_setup::install_proxy_env_unchecked(&home, port, false, force);
-                println!(
-                    "\x1b[32m✓\x1b[0m Proxy enabled on port {port}. LLM requests will be compressed."
-                );
+
+                if autostart_ok {
+                    println!(
+                        "\x1b[32m✓\x1b[0m Proxy enabled on port {port}. LLM requests will be compressed."
+                    );
+                } else if crate::proxy_setup::is_proxy_reachable(port) {
+                    println!(
+                        "\x1b[32m✓\x1b[0m Clients wired to the proxy already serving port {port}."
+                    );
+                    println!(
+                        "  This platform has no autostart backend, so the proxy does not survive a"
+                    );
+                    println!("  reboot — start it again with:  lean-ctx proxy start --port={port}");
+                } else {
+                    // Both `install_shell_exports` and `install_codex_env` refuse to
+                    // write against an unreachable proxy, so nothing above wired
+                    // anything. Say that plainly instead of claiming success.
+                    eprintln!(
+                        "\x1b[31m✗\x1b[0m Proxy enable: no autostart backend, and nothing is serving port {port}."
+                    );
+                    eprintln!(
+                        "  Client wiring requires a reachable proxy, so no client config was written."
+                    );
+                    eprintln!("  Start the proxy, then re-run enable — both steps are needed:");
+                    eprintln!("    lean-ctx proxy start --port={port}");
+                    eprintln!("    lean-ctx proxy enable");
+                    std::process::exit(1);
+                }
             }
             "disable" => {
                 if let Err(e) =

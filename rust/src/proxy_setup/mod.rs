@@ -32,7 +32,7 @@ use util::{PROXY_ENV_END, PROXY_ENV_START};
 
 pub use claude::anthropic_api_key_available;
 pub(crate) use claude::repair_claude_subscription_env;
-pub(crate) use codex::install_codex_env;
+pub(crate) use codex::{CodexEnvOutcome, install_codex_env};
 pub(crate) use commandcode::COMMANDCODE_MCP_INSTRUCTIONS;
 pub use grok::{grok_session_auth_available, xai_api_key_available};
 pub(crate) use util::is_proxy_reachable;

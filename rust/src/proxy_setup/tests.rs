@@ -440,6 +440,67 @@ fn codex_env_chatgpt_mode_optout_writes_nothing() {
     assert!(cfg.contains("model = \"gpt-5.5\""), "user keys preserved");
 }
 
+/// #1775: `codex-chatgpt on` printed its green "enabled" line before the
+/// installer ran, so a write skipped against an unreachable proxy still read as
+/// success. The installer now reports what it actually did, and the CLI prints
+/// that instead of its intent.
+#[test]
+fn codex_env_reports_skipped_when_proxy_is_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex_dir = dir.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.5\"\n").unwrap();
+    // Bind then drop: the port is now free, i.e. nothing is serving it. The
+    // other tests deliberately keep their listener alive to look reachable.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+
+    let outcome = install_codex_env_at_mode(&codex_dir, port, true, CodexProxyMode::ChatGpt, true);
+
+    assert_eq!(outcome, CodexEnvOutcome::SkippedProxyDown);
+    let cfg = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+    assert!(
+        !cfg.contains("model_provider") && !cfg.contains("127.0.0.1"),
+        "a skipped pass must write nothing, got:\n{cfg}"
+    );
+}
+
+/// A ChatGPT login with the opt-in off is the intended resting state, not a
+/// failure — the outcome must say so rather than looking like a skipped write.
+#[test]
+fn codex_env_reports_left_native_for_chatgpt_optout() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex_dir = dir.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.5\"\n").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let outcome = install_codex_env_at_mode(&codex_dir, port, true, CodexProxyMode::ChatGpt, false);
+
+    assert_eq!(outcome, CodexEnvOutcome::LeftNative);
+}
+
+/// The first opt-in pass writes; a second identical pass must report that the
+/// config was already in the requested state, not claim a fresh write.
+#[test]
+fn codex_env_reports_written_then_already_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex_dir = dir.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.5\"\n").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let first = install_codex_env_at_mode(&codex_dir, port, true, CodexProxyMode::ChatGpt, true);
+    let second = install_codex_env_at_mode(&codex_dir, port, true, CodexProxyMode::ChatGpt, true);
+
+    assert_eq!(first, CodexEnvOutcome::Written);
+    assert_eq!(second, CodexEnvOutcome::AlreadyConfigured);
+}
+
 /// Flipping the opt-in OFF after it was ON strips the provider config back to
 /// native, so Codex history + cloud/remote return (#597).
 #[test]
