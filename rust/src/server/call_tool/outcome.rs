@@ -1,6 +1,25 @@
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
 
+pub(super) fn append_rules_self_heal_status(
+    result_text: String,
+    heal_result: Option<&crate::rules_inject::InjectResult>,
+) -> String {
+    let Some(heal_result) = heal_result else {
+        return result_text;
+    };
+
+    if !heal_result.errors.is_empty() || heal_result.updated.is_empty() {
+        return result_text;
+    }
+
+    format!(
+        "{result_text}\n\n[RULES AUTO-UPDATED] Your lean-ctx rules were written by \
+         an older version and have been refreshed on disk. Start a new session to \
+         load them for full compatibility."
+    )
+}
+
 /// Classifies a failed `roots/list` call (GH #694). `-32601 Method not found`
 /// means the client declared the roots capability but does not implement the
 /// request (Cursor's documented behavior, #699) — retrying can never succeed.

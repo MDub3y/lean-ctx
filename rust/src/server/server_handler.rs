@@ -44,6 +44,11 @@ fn server_capabilities(resources: bool, prompts: bool) -> ServerCapabilities {
     }
 }
 
+fn suppress_initialize_instructions(client_id: &str) -> bool {
+    let cfg = crate::core::config::Config::load();
+
+    cfg.declines_rule_steering() || matches!(client_id, "antigravity" | "gemini-cli")
+}
 impl ServerHandler for LeanCtxServer {
     fn get_info(&self) -> ServerInfo {
         let capabilities = server_capabilities(true, true);
@@ -182,7 +187,7 @@ impl ServerHandler for LeanCtxServer {
             );
             if maintenance.is_some() {
                 if let Some(home) = dirs::home_dir() {
-                    let _ = crate::rules_inject::inject_all_rules(&home);
+                    startup_rule_maintenance_at_home(&home);
                     // The on-demand SKILL.md belongs to the same steering surface
                     // as the rules block: the session-start heal writes rules for
                     // every detected client, so a fresh machine that never ran
@@ -316,15 +321,12 @@ impl ServerHandler for LeanCtxServer {
         // response contains `instructions`. The MCP spec marks it optional,
         // but these clients fail on any unexpected field in the JSON envelope.
         //
-        // GH #1599: `rules_injection = "off"` means the user has opted out of
-        // lean-ctx steering their agent. The initialize `instructions` field is
-        // that same steering block delivered over a different channel, so
-        // honouring the setting in the files but still shipping ~780 tokens of
-        // "ALWAYS use ctx_*, NEVER use native Read/Grep" on every session start
-        // makes the setting look broken. Off means off, on every channel.
-        let injection_off = crate::core::config::Config::load().rules_injection_effective()
-            == crate::core::config::RulesInjection::Off;
-        if injection_off || matches!(client_caps.client_id.as_str(), "antigravity" | "gemini-cli") {
+        // GH #1599/#1758: both `rules_injection = "off"` and an explicit
+        // `setup.auto_inject_rules = false` decline lean-ctx rule steering.
+        // The initialize `instructions` field is that same steering block
+        // delivered over a different channel, so the central policy predicate
+        // must govern this surface too.
+        if suppress_initialize_instructions(client_caps.client_id.as_str()) {
             Ok(result)
         } else {
             let instructions = crate::instructions::build_instructions_with_client_and_session(
@@ -748,10 +750,231 @@ impl ServerHandler for LeanCtxServer {
     }
 }
 
+fn startup_rule_maintenance_at_home(home: &std::path::Path) {
+    let cfg = crate::core::config::Config::load();
+    if cfg.declines_rule_steering() {
+        return;
+    }
+    let _ = crate::rules_inject::inject_all_rules(home);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn initialize_instructions_respect_explicit_auto_inject_false() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = false\n",
+        )
+        .unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+
+        assert!(
+            suppress_initialize_instructions("cursor"),
+            "explicit auto_inject_rules=false declines rule steering and must suppress MCP initialize instructions"
+        );
+    }
+
+    #[test]
+    fn initialize_instructions_preserve_default_auto_behavior() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+
+        assert!(
+            !suppress_initialize_instructions("cursor"),
+            "default auto_inject_rules=None must preserve initialize instructions"
+        );
+    }
+
+    #[test]
+    fn initialize_instructions_preserve_explicit_true_behavior() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = true\n",
+        )
+        .unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+
+        assert!(
+            !suppress_initialize_instructions("cursor"),
+            "explicit auto_inject_rules=true must preserve initialize instructions"
+        );
+    }
+
+    #[test]
+    fn initialize_instructions_respect_rules_injection_off() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "off");
+
+        assert!(
+            suppress_initialize_instructions("cursor"),
+            "rules_injection=off must continue suppressing initialize instructions"
+        );
+    }
+
+    #[test]
+    fn initialize_instructions_keep_client_compatibility_exceptions() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+
+        assert!(suppress_initialize_instructions("antigravity"));
+        assert!(suppress_initialize_instructions("gemini-cli"));
+    }
+    #[test]
+    fn startup_maintenance_respects_explicit_auto_inject_false() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        std::fs::write(
+            home.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = false\n",
+        )
+        .unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+        let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+        startup_rule_maintenance_at_home(&home);
+
+        let rules = home.join(".cursor/rules/lean-ctx.mdc");
+
+        assert!(
+            !rules.exists(),
+            "startup maintenance must not write Cursor rules when setup.auto_inject_rules=false"
+        );
+    }
+
+    #[test]
+    fn automatic_rule_maintenance_allows_default_startup_write() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        std::fs::write(
+            home.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+        let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+        startup_rule_maintenance_at_home(&home);
+
+        assert!(
+            home.join(".cursor/rules/lean-ctx.mdc").exists(),
+            "default auto_inject_rules=None must preserve zero-config startup rule maintenance"
+        );
+    }
+
+    #[test]
+    fn automatic_rule_maintenance_allows_explicit_true_startup_write() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        std::fs::write(
+            home.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = true\n",
+        )
+        .unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+        let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+        startup_rule_maintenance_at_home(&home);
+
+        assert!(
+            home.join(".cursor/rules/lean-ctx.mdc").exists(),
+            "explicit auto_inject_rules=true must preserve startup rule maintenance"
+        );
+    }
     /// lean-ctx emits `notifications/tools/list_changed` whenever a tool call
     /// mutates the dynamic tool set. The capability MUST be advertised on every
     /// client surface (resources/prompts on or off) — otherwise a strict client

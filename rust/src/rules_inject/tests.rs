@@ -592,3 +592,230 @@ fn inject_result_tracks_backed_up_files() {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("bak"))
     );
 }
+
+#[test]
+fn explicit_auto_inject_false_suppresses_freshness_self_heal() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[setup]\nauto_inject_rules = false\n",
+    )
+    .unwrap();
+
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+    let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    assert!(
+        freshness.is_none(),
+        "explicit setup.auto_inject_rules=false must suppress automatic stale-rule self-heal, got: {freshness:?}"
+    );
+}
+
+#[test]
+fn automatic_rule_maintenance_allows_default_freshness_check() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+    let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+    std::fs::create_dir_all(home.join(".cursor")).unwrap();
+    std::fs::write(
+        home.join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+    )
+    .unwrap();
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    assert!(
+        freshness.is_some(),
+        "default auto_inject_rules=None must preserve automatic freshness detection"
+    );
+}
+
+#[test]
+fn automatic_rule_maintenance_allows_explicit_true_freshness_check() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[setup]\nauto_inject_rules = true\n",
+    )
+    .unwrap();
+
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+    let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+    std::fs::create_dir_all(home.join(".cursor")).unwrap();
+    std::fs::write(
+        home.join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"lean-ctx":{"command":"lean-ctx","args":["mcp"]}}}"#,
+    )
+    .unwrap();
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    assert!(
+        freshness.is_some(),
+        "explicit auto_inject_rules=true must preserve automatic freshness detection"
+    );
+}
+
+#[test]
+fn project_scope_suppresses_global_freshness_self_heal() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "rules_scope = \"project\"\n",
+    )
+    .unwrap();
+
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+    let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "project");
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    assert!(
+        freshness.is_none(),
+        "rules_scope=project must not request a global rules self-heal that inject_all_rules will refuse, got: {freshness:?}"
+    );
+}
+
+#[test]
+fn missing_mcp_config_suppresses_freshness_self_heal() {
+    let _guard = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+
+    std::fs::create_dir_all(home.join(".cursor/rules")).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+    let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+    let target = build_rules_targets(&home, crate::core::config::RulesInjection::Shared)
+        .into_iter()
+        .find(|target| target.name == "Cursor")
+        .expect("Cursor rules target must exist");
+
+    std::fs::write(
+        &target.path,
+        format!("{START_MARK}\n<!-- version: 0 -->\nstale rules\n{END_MARK}\n"),
+    )
+    .unwrap();
+
+    assert!(
+        !home.join(".cursor/mcp.json").exists(),
+        "precondition: Cursor MCP config must be absent"
+    );
+
+    assert!(
+        !detect::is_mcp_configured(&target, &home),
+        "precondition: Cursor must be ineligible for rules injection when its MCP config is absent"
+    );
+
+    let freshness = check_rules_freshness_at_home("cursor", &home);
+
+    assert!(
+        freshness.is_none(),
+        "freshness must not request an auto-heal for a target inject_all_rules will skip because MCP is not configured, got: {freshness:?}"
+    );
+}
