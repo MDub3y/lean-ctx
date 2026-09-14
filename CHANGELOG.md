@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — `ctx_patch` batch receipt accounts for every op (#1767)
+
+- A batch receipt stated only a total (`10 anchored edits`), so a caller could
+  not tell which ops landed where without reading the evidence diff — and that
+  diff is the first thing the turn budget (4096 tokens by default) removes,
+  which left callers running `grep` against the file to find out what had
+  happened. The receipt now carries `ops: N/N applied` plus one line per op
+  (kind, span, lines produced) in the caller's order, ahead of the diff, so the
+  accounting survives any truncation that keeps the header at all.
+
+### Fixed — the `ctx_shell` redirect refusal names the rule that fired (#1768)
+
+- The refusal justified itself with "MCP protocol corruption on large
+  payloads" while the guard allows a megabyte into `/tmp` and blocks two bytes
+  into a project file — a size rationale for a path-scoped rule. It now names
+  the redirect target that tripped it and states the rule (the destination
+  decides), the real reason (ctx_shell compresses what it returns, so a
+  redirect into a file you keep can persist compression markers instead of the
+  command's bytes), and the reachable alternative.
+
 ### Fixed — `tail -N` hook rewrite and `lines:-N` (#1759)
 
 - `ctx_read` accepts `mode="lines:-N"` — the last N lines — so the Bash-hook
