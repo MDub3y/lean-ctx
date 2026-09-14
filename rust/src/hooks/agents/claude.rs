@@ -200,7 +200,7 @@ pub(crate) fn install_claude_permissions_deny_replace(home: &std::path::Path) {
 /// Auto-approve lean-ctx MCP tools in Claude Code's `permissions.allow` so
 /// auto mode and the classifier do not block or avoid them.  This is the
 /// `settings.json` counterpart to the `autoApprove` field in `~/.claude.json`.
-fn install_claude_permissions_allow_mcp(home: &std::path::Path) {
+pub(crate) fn install_claude_permissions_allow_mcp(home: &std::path::Path) {
     let settings_path = home.join(".claude").join("settings.json");
 
     let mut json = if settings_path.exists() {

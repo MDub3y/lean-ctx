@@ -30,7 +30,7 @@ pub fn setup_single_agent(
     let home = crate::core::home::resolve_home_dir().unwrap_or_default();
     let mut result = AgentSetupResult::default();
 
-    crate::hooks::install_agent_hook_with_mode(agent_name, global, mode);
+    crate::hooks::install_agent_hook_respecting_rules_off(agent_name, global, mode);
 
     // #281: honor `[setup] auto_update_mcp = false` — skip MCP registration but
     // still install the hook, rules and skill. Locked-down environments can keep
@@ -57,6 +57,16 @@ pub fn setup_single_agent(
 }
 
 pub fn configure_agent_mcp(agent: &str) -> Result<(), String> {
+    let allow_rule_steering = crate::core::config::Config::load().rules_injection_effective()
+        != crate::core::config::RulesInjection::Off;
+
+    configure_agent_mcp_with_rule_steering(agent, allow_rule_steering)
+}
+
+pub(crate) fn configure_agent_mcp_with_rule_steering(
+    agent: &str,
+    allow_rule_steering: bool,
+) -> Result<(), String> {
     // Prefer HOME/USERPROFILE (dirs::home_dir ignores env on Windows).
     let home = crate::core::home::resolve_home_dir()
         .ok_or_else(|| "Cannot determine home directory".to_string())?;
@@ -66,12 +76,13 @@ pub fn configure_agent_mcp(agent: &str) -> Result<(), String> {
 
     let mut errors = Vec::new();
     for t in &targets {
-        if let Err(e) = crate::core::editor_registry::write_config_with_options(
+        if let Err(e) = crate::core::editor_registry::write_config_with_options_and_rule_steering(
             t,
             &binary,
             WriteOptions {
                 overwrite_invalid: true,
             },
+            allow_rule_steering,
         ) {
             eprintln!(
                 "\x1b[33m⚠\x1b[0m  Could not configure {}: {}",
@@ -82,7 +93,7 @@ pub fn configure_agent_mcp(agent: &str) -> Result<(), String> {
         }
     }
 
-    if agent == "kiro" {
+    if agent == "kiro" && allow_rule_steering {
         install_kiro_steering(&home);
     }
 
@@ -686,6 +697,59 @@ pub fn disable_agent_mcp(agent: &str, overwrite_invalid: bool) -> Result<(), Str
 #[cfg(test)]
 mod qodercli_tests {
     use super::*;
+
+    struct CurrentDirGuard(std::path::PathBuf);
+
+    impl CurrentDirGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self(previous)
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn kiro_mcp_configuration_respects_rule_steering_policy() {
+        let _env_lock = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+
+        let _home_guard = crate::setup::EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+        let _profile_guard =
+            crate::setup::EnvVarGuard::set("USERPROFILE", home.to_string_lossy().as_ref());
+        let _cwd_guard = CurrentDirGuard::set(&project);
+
+        configure_agent_mcp_with_rule_steering("kiro", false).unwrap();
+
+        assert!(
+            home.join(".kiro/settings/mcp.json").exists(),
+            "Kiro MCP registration must still be written when steering is disabled"
+        );
+
+        let steering = project.join(".kiro/steering/lean-ctx.md");
+
+        assert!(
+            !steering.exists(),
+            "steering-disabled Kiro setup must not create lean-ctx steering"
+        );
+
+        configure_agent_mcp_with_rule_steering("kiro", true).unwrap();
+
+        assert!(
+            steering.exists(),
+            "test precondition failed: steering-enabled Kiro setup should create its steering file"
+        );
+    }
 
     #[test]
     fn commandcode_agent_target_uses_command_code_schema() {

@@ -176,16 +176,18 @@ fn is_deny_suppressed() -> bool {
 use agents::{
     install_amp_hook, install_antigravity_cli_hook, install_antigravity_hook,
     install_claude_hook_config, install_claude_hook_scripts, install_claude_hook_with_mode,
-    install_claude_permissions_deny_replace, install_claude_project_hooks, install_cline_rules,
-    install_codebuddy_hook_config, install_codebuddy_hook_scripts,
-    install_codebuddy_hook_with_mode, install_codebuddy_permissions_deny_replace,
-    install_codebuddy_project_hooks, install_codex_hook, install_copilot_hook,
-    install_crush_hook_with_mode, install_cursor_deny_hook, install_cursor_hook_config,
-    install_cursor_hook_scripts, install_cursor_hook_with_mode, install_gemini_deny_hook,
-    install_gemini_hook, install_gemini_hook_config, install_gemini_hook_scripts, install_grok_mcp,
-    install_hermes_hook_with_mode, install_jetbrains_hook, install_kiro_hook,
-    install_openclaw_hook, install_opencode_hook_with_mode, install_pi_hook_with_mode,
-    install_qoder_hook_with_mode, install_vibe_hook, install_windsurf_hooks,
+    install_claude_permissions_allow_mcp, install_claude_permissions_deny_replace,
+    install_claude_project_hooks, install_cline_rules, install_codebuddy_hook_config,
+    install_codebuddy_hook_scripts, install_codebuddy_hook_with_mode,
+    install_codebuddy_permissions_deny_replace, install_codebuddy_project_hooks,
+    install_codex_hook, install_codex_runtime_hook, install_copilot_hook,
+    install_copilot_runtime_hook, install_crush_hook_with_mode, install_cursor_deny_hook,
+    install_cursor_hook_config, install_cursor_hook_scripts, install_cursor_hook_with_mode,
+    install_gemini_deny_hook, install_gemini_hook, install_gemini_hook_config,
+    install_gemini_hook_scripts, install_grok_mcp, install_hermes_hook_with_mode,
+    install_jetbrains_hook, install_kiro_hook, install_openclaw_hook,
+    install_opencode_hook_with_mode, install_pi_hook_with_mode, install_qoder_hook_with_mode,
+    install_qoder_runtime_hook_with_mode, install_vibe_hook, install_windsurf_hooks,
     install_windsurf_hooks_replace, install_windsurf_rules,
 };
 use support::{
@@ -329,7 +331,7 @@ fn refresh_agent_hooks(agent: &str, home: &std::path::Path) {
                 install_gemini_deny_hook(home);
             }
         }
-        "codex" => install_codex_hook(),
+        "codex" => install_codex_runtime_hook(),
         "windsurf" => {
             if mode == HookMode::Replace {
                 install_windsurf_hooks_replace(home);
@@ -337,8 +339,8 @@ fn refresh_agent_hooks(agent: &str, home: &std::path::Path) {
                 install_windsurf_hooks(home);
             }
         }
-        "copilot" => install_copilot_hook(true),
-        "qoder" | "qodercli" => install_qoder_hook_with_mode(mode),
+        "copilot" => install_copilot_runtime_hook(true),
+        "qoder" | "qodercli" => install_qoder_runtime_hook_with_mode(mode),
         _ => {}
     }
 }
@@ -1111,6 +1113,103 @@ pub fn install_agent_hook_with_mode(agent: &str, global: bool, mode: HookMode) {
             );
             std::process::exit(1);
         }
+    }
+}
+
+/// Install an agent integration for an explicit setup/repair action.
+///
+/// `setup.auto_inject_rules=false` only disables automatic steering and may be
+/// overridden by an explicit action. `rules_injection=off` is the stronger
+/// policy boundary: even explicit setup/repair must retain only the functional
+/// runtime integration and must not recreate steering artifacts.
+pub(crate) fn install_agent_hook_respecting_rules_off(agent: &str, global: bool, mode: HookMode) {
+    if crate::core::config::Config::load().rules_injection_effective()
+        == crate::core::config::RulesInjection::Off
+    {
+        install_agent_runtime_hook_with_mode(agent, global, mode);
+    } else {
+        install_agent_hook_with_mode(agent, global, mode);
+    }
+}
+
+/// Install only the functional runtime integration for an agent.
+///
+/// Unlike `install_agent_hook_with_mode`, this path must not create or
+/// register lean-ctx-authored rule/instruction files. Automatic `setup` uses
+/// it whenever steering is declined; explicit setup/repair reaches it through
+/// `install_agent_hook_respecting_rules_off` only for the stronger
+/// `rules_injection=off` policy.
+pub(crate) fn install_agent_runtime_hook_with_mode(agent: &str, global: bool, mode: HookMode) {
+    let home = crate::core::home::resolve_home_dir().unwrap_or_default();
+
+    match agent {
+        "claude" | "claude-code" => {
+            install_claude_hook_scripts(&home);
+            install_claude_hook_config(&home);
+
+            if mode == HookMode::Replace {
+                install_claude_permissions_deny_replace(&home);
+            }
+
+            install_claude_permissions_allow_mcp(&home);
+        }
+        "codebuddy" => {
+            install_codebuddy_hook_scripts(&home);
+            install_codebuddy_hook_config(&home);
+
+            if mode == HookMode::Replace {
+                install_codebuddy_permissions_deny_replace(&home);
+            }
+        }
+        "cursor" => {
+            install_cursor_hook_scripts(&home);
+            install_cursor_hook_config(&home);
+
+            if mode == HookMode::Replace {
+                install_cursor_deny_hook(global);
+            }
+        }
+        "gemini" => {
+            install_gemini_hook_scripts(&home);
+            install_gemini_hook_config(&home);
+
+            if mode == HookMode::Replace {
+                install_gemini_deny_hook(&home);
+            }
+
+            // Gemini setup also maintains the Antigravity CLI runtime plugin.
+            // Its SessionStart observe channel is independently governed by
+            // declines_rule_steering().
+            install_antigravity_cli_hook();
+        }
+        "codex" => install_codex_runtime_hook(),
+        "windsurf" => {
+            if mode == HookMode::Replace {
+                install_windsurf_hooks_replace(&home);
+            } else {
+                install_windsurf_hooks(&home);
+            }
+        }
+        "copilot" | "vscode" => install_copilot_runtime_hook(global),
+        "qoder" | "qodercli" => install_qoder_runtime_hook_with_mode(mode),
+
+        // Pi's global setup installs the runtime package/config but deliberately
+        // skips its project-local AGENTS.md when global=true.
+        "pi" => install_pi_hook_with_mode(global, mode),
+
+        // These integrations are functional MCP/plugin installers and do not
+        // create lean-ctx rule files themselves.
+        "antigravity" => install_antigravity_hook(),
+        "antigravity-cli" => install_antigravity_cli_hook(),
+        "amp" => install_amp_hook(),
+        "jetbrains" => install_jetbrains_hook(),
+        "openclaw" => install_openclaw_hook(),
+        "vibe" => install_vibe_hook(),
+        // No independent runtime hook exists for the remaining integrations.
+        // Their MCP registration is handled separately by setup's editor/MCP
+        // writers. Do not call their full installers here because some also
+        // create rule/steering files. Unknown agents are likewise a safe no-op.
+        _ => {}
     }
 }
 

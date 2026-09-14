@@ -13,7 +13,7 @@ const COOLDOWN_CALLS: u32 = 5;
 
 /// Whether bypass hints are enabled (independent of `minimal_overhead`).
 pub fn is_enabled() -> bool {
-    effective_mode() != "off"
+    !crate::core::config::Config::load().declines_rule_steering() && effective_mode() != "off"
 }
 
 fn now_millis() -> u64 {
@@ -56,6 +56,9 @@ pub fn check(data_dir: &Path) -> Option<String> {
     }
 
     let cfg = crate::core::config::Config::load();
+    if cfg.declines_rule_steering() {
+        return None;
+    }
     let shadow = cfg.shadow_mode;
     let aggressive = mode == "aggressive" || shadow;
 
@@ -173,6 +176,12 @@ fn effective_mode() -> String {
 /// Used by the redirect-suffix logic to append a nudge to `.lctx` temp files
 /// when the model appears to be drifting away from ctx_* tools.
 pub fn model_is_drifting(data_dir: &Path) -> bool {
+    // This signal feeds the model-visible redirect nudge. Once the user has
+    // declined rule steering, drift is intentionally non-actionable.
+    if crate::core::config::Config::load().declines_rule_steering() {
+        return false;
+    }
+
     let radar_path = radar_jsonl_path(data_dir);
     if !radar_path.exists() {
         return true;
@@ -458,6 +467,44 @@ mod tests {
     }
 
     // ── is_enabled ───────────────────────────────────────────────
+
+    #[test]
+    fn rule_steering_opt_out_disables_bypass_nudges() {
+        let _env_lock = crate::core::data_dir::test_env_lock();
+        let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "off");
+        let _hints_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_BYPASS_HINTS", "aggressive");
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("context_radar.jsonl");
+        let now_secs = now_millis() / 1000;
+
+        set_session_id("steering-opt-out-test");
+        LAST_LCTX_CALL_TS.store(1, Ordering::Relaxed);
+
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"ts\":{now_secs},\"event_type\":\"native_tool\",\"tokens\":100,\"tool_name\":\"Read\",\"conversation_id\":\"steering-opt-out-test\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            !is_enabled(),
+            "rules_injection=off must disable model-visible bypass hints"
+        );
+
+        assert_eq!(
+            check(dir.path()),
+            None,
+            "rules_injection=off must suppress direct bypass hint text"
+        );
+
+        assert!(
+            !model_is_drifting(dir.path()),
+            "rules_injection=off must suppress the redirect drift nudge too"
+        );
+    }
 
     #[test]
     fn is_enabled_respects_effective_mode() {

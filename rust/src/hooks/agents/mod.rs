@@ -28,7 +28,8 @@ pub(super) use antigravity::{install_antigravity_cli_hook, install_antigravity_h
 pub(crate) use claude::{CLAUDE_MD_BLOCK_START, sync_claude_global_rules_block};
 pub(super) use claude::{
     install_claude_hook_config, install_claude_hook_scripts, install_claude_hook_with_mode,
-    install_claude_permissions_deny_replace, install_claude_project_hooks,
+    install_claude_permissions_allow_mcp, install_claude_permissions_deny_replace,
+    install_claude_project_hooks,
 };
 pub(super) use cline::install_cline_rules;
 pub(crate) use codebuddy::CODEBUDDY_MD_BLOCK_START;
@@ -38,7 +39,8 @@ pub(super) use codebuddy::{
     install_codebuddy_project_hooks,
 };
 pub use codex::install_codex_hook;
-pub(super) use copilot::install_copilot_hook;
+pub(super) use codex::install_codex_runtime_hook;
+pub(super) use copilot::{install_copilot_hook, install_copilot_runtime_hook};
 pub(super) use crush::install_crush_hook_with_mode;
 pub use cursor::install_cursor_hook;
 pub(super) use cursor::{
@@ -58,7 +60,7 @@ pub(super) use openclaw::install_openclaw_hook;
 pub(super) use opencode::install_opencode_hook_with_mode;
 pub(crate) use opencode::unregister_opencode_instructions;
 pub(super) use pi::install_pi_hook_with_mode;
-pub(super) use qoder::install_qoder_hook_with_mode;
+pub(super) use qoder::{install_qoder_hook_with_mode, install_qoder_runtime_hook_with_mode};
 pub(super) use vibe::install_vibe_hook;
 pub(super) use windsurf::{
     install_windsurf_hooks, install_windsurf_hooks_replace, install_windsurf_rules,

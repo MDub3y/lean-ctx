@@ -96,7 +96,13 @@ fn commandcode_config_uses_command_code_schema() {
     .unwrap();
 
     let t = target("test", path.clone(), ConfigType::CommandCode);
-    let res = write_commandcode_config(&t, "/new/path/lean-ctx", WriteOptions::default()).unwrap();
+    let res = write_commandcode_config_with_rule_steering(
+        &t,
+        "/new/path/lean-ctx",
+        WriteOptions::default(),
+        true,
+    )
+    .unwrap();
     assert_eq!(res.action, WriteAction::Updated);
 
     let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -113,14 +119,190 @@ fn commandcode_config_uses_command_code_schema() {
     );
 
     // Idempotent: second write reports Already.
-    let res = write_commandcode_config(&t, "/new/path/lean-ctx", WriteOptions::default()).unwrap();
+    let res = write_commandcode_config_with_rule_steering(
+        &t,
+        "/new/path/lean-ctx",
+        WriteOptions::default(),
+        true,
+    )
+    .unwrap();
     assert_eq!(res.action, WriteAction::Already);
+}
+
+#[test]
+fn legacy_commandcode_writer_respects_absolute_rules_off() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "off");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    let t = target("Command Code", path.clone(), ConfigType::CommandCode);
+
+    let result =
+        write_config_with_options(&t, "/new/path/lean-ctx", WriteOptions::default()).unwrap();
+
+    assert_eq!(result.action, WriteAction::Created);
+
+    let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let entry = &json["mcpServers"]["lean-ctx"];
+
+    assert!(
+        entry.get("instructions").is_none(),
+        "legacy/explicit config writer must not resurrect Command Code steering under rules_injection=off"
+    );
+}
+
+#[test]
+fn commandcode_rules_off_removes_owned_existing_steering() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "off");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": {
+                "lean-ctx": {
+                    "transport": "stdio",
+                    "enabled": true,
+                    "command": "/old/path/lean-ctx",
+                    "instructions": crate::proxy_setup::COMMANDCODE_MCP_INSTRUCTIONS
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let t = target("Command Code", path.clone(), ConfigType::CommandCode);
+
+    let res = write_config_with_options(&t, "/new/path/lean-ctx", WriteOptions::default()).unwrap();
+
+    assert_eq!(res.action, WriteAction::Updated);
+
+    let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let entry = &json["mcpServers"]["lean-ctx"];
+
+    assert_eq!(entry["command"], "/new/path/lean-ctx");
+    assert!(
+        entry.get("instructions").is_none(),
+        "rules_injection=off must remove lean-ctx-owned Command Code steering"
+    );
+}
+
+#[test]
+fn commandcode_rules_off_preserves_custom_existing_instructions() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "off");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+
+    std::fs::write(
+        &path,
+        r#"{
+            "mcpServers": {
+                "lean-ctx": {
+                    "transport": "stdio",
+                    "enabled": true,
+                    "command": "/old/path/lean-ctx",
+                    "instructions": "Keep this user-authored instruction"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let t = target("Command Code", path.clone(), ConfigType::CommandCode);
+
+    let res = write_config_with_options(&t, "/new/path/lean-ctx", WriteOptions::default()).unwrap();
+
+    assert_eq!(res.action, WriteAction::Updated);
+
+    let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let entry = &json["mcpServers"]["lean-ctx"];
+
+    assert_eq!(entry["command"], "/new/path/lean-ctx");
+    assert_eq!(
+        entry["instructions"], "Keep this user-authored instruction",
+        "absolute off must not delete instructions that lean-ctx does not own"
+    );
 }
 
 /// Cline CLI nests `command`/`args`/`env` under a `transport` object —
 /// verified against a live `cline mcp install --yes --json` (see
 /// `write_cline_cli_config`'s doc comment) — unlike every other
 /// `mcpServers`-keyed agent, which keeps them flat.
+
+#[test]
+fn commandcode_config_can_omit_new_steering() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    let t = target("test", path.clone(), ConfigType::CommandCode);
+
+    let res = write_config_with_options_and_rule_steering(
+        &t,
+        "/new/path/lean-ctx",
+        WriteOptions::default(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(res.action, WriteAction::Created);
+
+    let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let entry = &json["mcpServers"]["lean-ctx"];
+
+    assert_eq!(entry["transport"], "stdio");
+    assert_eq!(entry["enabled"], true);
+    assert_eq!(entry["command"], "/new/path/lean-ctx");
+    assert!(
+        entry.get("instructions").is_none(),
+        "setup with steering disabled must not create Command Code instructions"
+    );
+}
+
+#[test]
+fn commandcode_config_preserves_existing_steering_when_suppressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+
+    std::fs::write(
+        &path,
+        r#"{
+            "mcpServers": {
+                "lean-ctx": {
+                    "transport": "stdio",
+                    "enabled": true,
+                    "command": "/old/path/lean-ctx",
+                    "instructions": "existing instructions"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let t = target("test", path.clone(), ConfigType::CommandCode);
+
+    let res = write_config_with_options_and_rule_steering(
+        &t,
+        "/new/path/lean-ctx",
+        WriteOptions::default(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(res.action, WriteAction::Updated);
+
+    let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let entry = &json["mcpServers"]["lean-ctx"];
+
+    assert_eq!(entry["command"], "/new/path/lean-ctx");
+    assert_eq!(entry["instructions"], "existing instructions");
+}
+
 #[test]
 fn cline_cli_config_nests_command_under_transport() {
     let dir = tempfile::tempdir().unwrap();

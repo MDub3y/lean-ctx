@@ -5,6 +5,14 @@ use super::super::{
     resolve_hook_command_binary, write_file,
 };
 
+pub(crate) fn install_qoder_runtime_hook_with_mode(mode: HookMode) {
+    install_qoder_hook();
+
+    if mode == HookMode::Replace {
+        install_qoder_deny_hook();
+    }
+}
+
 pub(crate) fn install_qoder_hook_with_mode(mode: HookMode) {
     match mode {
         HookMode::Replace => {

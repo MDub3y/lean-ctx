@@ -70,6 +70,12 @@ pub fn handle_observe() {
 /// shadow mode is active, i.e. the policy the line describes is mechanically
 /// enforced). Costs ~45 tokens per turn — kept to a single line by design.
 fn emit_prompt_submit_precedence(input: &str) {
+    // This is explicit rule/tool-precedence steering, not passive telemetry.
+    // Honour the same central opt-out as every other automatic steering channel.
+    if crate::core::config::Config::load().declines_rule_steering() {
+        return;
+    }
+
     let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else {
         return;
     };
@@ -188,6 +194,12 @@ fn session_lifecycle_presence_fields(
 }
 
 fn emit_dedicated_session_context(input: &str) {
+    // SessionStart additionalContext is model-visible rule steering.
+    // Do not emit it after the user explicitly declined that steering.
+    if crate::core::config::Config::load().declines_rule_steering() {
+        return;
+    }
+
     let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else {
         return;
     };

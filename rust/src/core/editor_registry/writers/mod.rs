@@ -43,6 +43,18 @@ pub fn write_config_with_options(
     binary: &str,
     opts: WriteOptions,
 ) -> Result<WriteResult, String> {
+    let allow_rule_steering = crate::core::config::Config::load().rules_injection_effective()
+        != crate::core::config::RulesInjection::Off;
+
+    write_config_with_options_and_rule_steering(target, binary, opts, allow_rule_steering)
+}
+
+pub fn write_config_with_options_and_rule_steering(
+    target: &EditorTarget,
+    binary: &str,
+    opts: WriteOptions,
+    allow_rule_steering: bool,
+) -> Result<WriteResult, String> {
     if let Some(parent) = target.config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -63,7 +75,9 @@ pub fn write_config_with_options(
         ConfigType::AugmentVsCode => write_augment_vscode(target, binary, opts),
         ConfigType::OpenClaw => write_openclaw_config(target, binary, opts),
         ConfigType::VibeToml => write_vibe_toml(target, binary, opts),
-        ConfigType::CommandCode => write_commandcode_config(target, binary, opts),
+        ConfigType::CommandCode => {
+            write_commandcode_config_with_rule_steering(target, binary, opts, allow_rule_steering)
+        }
         ConfigType::ClineCli => write_cline_cli_config(target, binary, opts),
         ConfigType::OmpMcp => write_omp_mcp(target, binary, opts),
         ConfigType::CodeWhale => write_codewhale_config(target, binary, opts),

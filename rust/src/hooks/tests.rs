@@ -74,6 +74,130 @@ fn qodercli_hook_detection_uses_shared_settings_file() {
     assert!(!hooks_installed_for("qodercli", tmp.path()));
 }
 
+#[test]
+fn runtime_hook_refresh_does_not_write_rule_files() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let copilot_home = home.join(".copilot");
+
+    std::fs::create_dir_all(&codex_home).unwrap();
+
+    let _home_guard = crate::setup::EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+    let _profile_guard =
+        crate::setup::EnvVarGuard::set("USERPROFILE", home.to_string_lossy().as_ref());
+
+    let _codex_guard =
+        crate::setup::EnvVarGuard::set("CODEX_HOME", codex_home.to_string_lossy().as_ref());
+
+    let _copilot_guard =
+        crate::setup::EnvVarGuard::set("COPILOT_HOME", copilot_home.to_string_lossy().as_ref());
+
+    install_codex_runtime_hook();
+
+    assert!(
+        codex_home.join("hooks.json").exists(),
+        "Codex runtime refresh must install hooks.json"
+    );
+
+    assert!(
+        !codex_home.join("instructions.md").exists(),
+        "Codex runtime refresh must not write instructions.md"
+    );
+
+    assert!(
+        !codex_home.join("LEAN-CTX.md").exists(),
+        "Codex runtime refresh must not write LEAN-CTX.md"
+    );
+
+    assert!(
+        !codex_home.join("AGENTS.md").exists(),
+        "Codex runtime refresh must not write AGENTS.md"
+    );
+
+    install_copilot_runtime_hook(true);
+
+    assert!(
+        copilot_home.join("hooks/hooks.json").exists(),
+        "Copilot runtime refresh must install hooks"
+    );
+
+    assert!(
+        !copilot_home.join("instructions.md").exists(),
+        "Copilot runtime refresh must not write instructions.md"
+    );
+
+    install_qoder_runtime_hook_with_mode(HookMode::Hybrid);
+
+    assert!(
+        home.join(".qoder/settings.json").exists(),
+        "Qoder runtime refresh must install hook config"
+    );
+
+    assert!(
+        !home.join(".qoder/rules/lean-ctx.md").exists(),
+        "Qoder runtime refresh must not write rule files"
+    );
+}
+
+#[test]
+fn explicit_hook_policy_respects_absolute_rules_off() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let copilot_home = home.join(".copilot");
+
+    let _home_guard = crate::setup::EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+    let _profile_guard =
+        crate::setup::EnvVarGuard::set("USERPROFILE", home.to_string_lossy().as_ref());
+    let _copilot_guard =
+        crate::setup::EnvVarGuard::set("COPILOT_HOME", copilot_home.to_string_lossy().as_ref());
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "off");
+
+    install_agent_hook_respecting_rules_off("copilot", true, HookMode::Hybrid);
+
+    assert!(
+        copilot_home.join("hooks/hooks.json").exists(),
+        "absolute off must retain the functional Copilot runtime hook"
+    );
+    assert!(
+        !home.join(".copilot/instructions.md").exists(),
+        "explicit setup/repair must not recreate Copilot steering under rules_injection=off"
+    );
+}
+
+#[test]
+fn explicit_hook_policy_keeps_auto_false_overrideable() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let config_dir = home.join("lean-ctx-config");
+
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[setup]\nauto_inject_rules = false\nauto_update_mcp = false\n",
+    )
+    .unwrap();
+
+    let _home_guard = crate::setup::EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+    let _profile_guard =
+        crate::setup::EnvVarGuard::set("USERPROFILE", home.to_string_lossy().as_ref());
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+
+    install_agent_hook_respecting_rules_off("copilot", true, HookMode::Hybrid);
+
+    assert!(
+        home.join(".copilot/instructions.md").exists(),
+        "an explicit setup/repair action may override setup.auto_inject_rules=false"
+    );
+}
+
 // ── #555: .github/copilot-instructions.md ──────────────────────────────
 
 #[test]
@@ -865,4 +989,83 @@ fn mcp_only_agents_are_supported_but_claim_no_hook_surface() {
             "`{agent}` has no deny infrastructure"
         );
     }
+}
+
+#[test]
+fn runtime_only_setup_dispatch_avoids_rule_writers() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let config_dir = home.join("lean-ctx-config");
+
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::create_dir_all(home.join(".cursor")).unwrap();
+    std::fs::create_dir_all(home.join(".config/crush")).unwrap();
+    std::fs::create_dir_all(home.join(".hermes")).unwrap();
+    std::fs::create_dir_all(home.join(".kiro")).unwrap();
+    std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
+
+    let _home_guard = crate::setup::EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+    let _profile_guard =
+        crate::setup::EnvVarGuard::set("USERPROFILE", home.to_string_lossy().as_ref());
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+    let _scope_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_SCOPE", "global");
+
+    install_agent_runtime_hook_with_mode("claude", true, HookMode::Hybrid);
+    install_agent_runtime_hook_with_mode("cursor", true, HookMode::Hybrid);
+
+    // These agents have no independent runtime hook surface. Their MCP config
+    // is handled by setup separately; runtime-only dispatch must not invoke the
+    // full rule-writing installer.
+    install_agent_runtime_hook_with_mode("crush", true, HookMode::Hybrid);
+    install_agent_runtime_hook_with_mode("hermes", true, HookMode::Hybrid);
+    install_agent_runtime_hook_with_mode("kiro", true, HookMode::Hybrid);
+    install_agent_runtime_hook_with_mode("opencode", true, HookMode::Hybrid);
+
+    let claude_dir = crate::setup::claude_config_dir(home);
+
+    assert!(
+        claude_dir.join("hooks/lean-ctx-rewrite.sh").exists(),
+        "runtime-only Claude setup must retain functional hooks"
+    );
+
+    assert!(
+        home.join(".cursor/hooks/lean-ctx-rewrite.sh").exists(),
+        "runtime-only Cursor setup must retain functional hooks"
+    );
+
+    assert!(
+        !claude_dir.join("CLAUDE.md").exists(),
+        "runtime-only setup must not create Claude steering"
+    );
+
+    assert!(
+        !home.join(".cursor/rules/lean-ctx.mdc").exists(),
+        "runtime-only setup must not create Cursor rules"
+    );
+
+    assert!(
+        !home.join(".config/crush/rules/lean-ctx.md").exists(),
+        "runtime-only setup must not create Crush rules"
+    );
+
+    assert!(
+        !home.join(".hermes/HERMES.md").exists(),
+        "runtime-only setup must not create Hermes rules"
+    );
+
+    assert!(
+        !home.join(".kiro/steering/lean-ctx.md").exists(),
+        "runtime-only setup must not create Kiro steering"
+    );
+
+    assert!(
+        !home.join(".config/opencode/AGENTS.md").exists(),
+        "runtime-only setup must not create OpenCode rules"
+    );
 }

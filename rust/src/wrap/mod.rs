@@ -134,7 +134,7 @@ fn run_wrap_for_agent(agent_key: &str) {
             HookMode::Replace => "Replace",
         }
     );
-    hooks::install_agent_hook_with_mode(agent_key, true, mode);
+    hooks::install_agent_hook_respecting_rules_off(agent_key, true, mode);
 
     // Re-render managed rule files on every wrap so [solution] changes add or
     // remove the canonical solution block instead of leaving stale guidance.
