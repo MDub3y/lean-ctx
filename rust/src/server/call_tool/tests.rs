@@ -7,7 +7,7 @@ use super::{finalize_call_result, roots_list_failure_is_permanent};
 /// parameters never reached it. These pins guarantee the bypass contract
 /// stays wired at the dispatch chokepoint.
 mod rules_self_heal_status_tests {
-    use super::super::pipeline::append_rules_self_heal_status;
+    use super::super::outcome::append_rules_self_heal_status;
 
     #[test]
     fn failed_rule_write_must_not_claim_auto_updated() {
@@ -72,10 +72,8 @@ mod rules_self_heal_status_tests {
             ..Default::default()
         };
 
-        let output = super::super::pipeline::append_rules_self_heal_status(
-            "original result".to_string(),
-            Some(&heal_result),
-        );
+        let output =
+            append_rules_self_heal_status("original result".to_string(), Some(&heal_result));
 
         assert_eq!(output, "original result");
         assert!(!output.contains("[RULES AUTO-UPDATED]"));
