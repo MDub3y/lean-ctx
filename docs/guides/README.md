@@ -38,7 +38,7 @@ Read modes let an integration ask for the representation that fits the task:
 | --- | --- |
 | `full` / `raw` | Exact source when it is needed |
 | `map` / `signatures` | Structure or API surface |
-| `diff` / `lines:N-M` | A change or a precise slice |
+| `diff` / `lines:N-M` / `lines:-N` | A change, a precise slice, or the last N lines |
 | `task` / `reference` / `auto` | A task-oriented or selected representation |
 
 Context reduction depends on the file, mode, task, and recovery behavior. Do

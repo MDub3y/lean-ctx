@@ -99,7 +99,7 @@ fn resolve_cli_read_mode(args: &[String]) -> &str {
 pub fn cmd_read(args: &[String]) {
     if args.is_empty() {
         eprintln!(
-            "Usage: lean-ctx read <file> [--mode auto|full|map|signatures|aggressive|entropy] [--fresh]"
+            "Usage: lean-ctx read <file> [--mode auto|full|map|signatures|aggressive|entropy|lines:N-M|lines:-N] [--fresh]"
         );
         std::process::exit(1);
     }
