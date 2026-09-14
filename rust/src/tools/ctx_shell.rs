@@ -28,15 +28,29 @@ pub(crate) fn validate_command_with_write_allow_paths(
     // #931: strip heredoc bodies before the redirect scanner — a `>` inside a
     // heredoc body is opaque data, not a file-write redirect.
     let cmd_no_heredoc = crate::core::shell_allowlist::strip_all_heredoc_bodies(command);
-    if has_file_write_redirect(&cmd_no_heredoc, write_allow_paths, project_root) {
-        return Some(
-            "ERROR: ctx_shell detected a file-write command (shell redirect > or >>). \
-             Use the native Write tool to create/modify files. \
-             ctx_shell is ONLY for reading command output (git status, cargo test, npm run, etc.). \
-             File writes via shell cause MCP protocol corruption on large payloads. \
-             Output capture to temp paths (/tmp, /var/tmp, $TMPDIR) is allowed."
-                .to_string(),
-        );
+    // #1768: the rule is the destination, not the size of the payload. The
+    // refusal used to justify itself with "MCP protocol corruption on large
+    // payloads" while the guard allows a megabyte into /tmp and blocks two
+    // bytes into a project file — so the stated reason argued *against* the
+    // verdict in both directions, and steered callers to retry smaller (no
+    // effect) or to avoid the sanctioned scratch capture. The reasons that
+    // actually hold are the ones #1303 and #1142 established: ctx_shell
+    // compresses what it returns, so output redirected into a file you keep
+    // can land there with compression markers instead of the command's own
+    // bytes; and a scratch capture is precisely how a large payload stays out
+    // of the MCP channel.
+    if let Some(target) =
+        disallowed_write_redirect_target(&cmd_no_heredoc, write_allow_paths, project_root)
+    {
+        return Some(format!(
+            "ERROR: ctx_shell refuses the redirect into `{target}` — the destination decides, \
+             not the size of the output. ctx_shell compresses what it returns, so a redirect \
+             into a file you keep can write compression markers instead of the command's own \
+             bytes, and ctx_shell never modifies project files. \
+             Use the native Write tool or ctx_patch for project files. \
+             Capturing output to a scratch path (/tmp, /var/tmp, $TMPDIR) is allowed — that \
+             keeps the output out of the MCP channel entirely."
+        ));
     }
 
     // #989: tee detection must run on heredoc-stripped text to avoid false
@@ -242,7 +256,7 @@ fn is_heredoc_file_write(
     // #931: strip heredoc bodies so `>` / `>>` inside the body are not
     // mistaken for file-write redirects.
     let stripped = crate::core::shell_allowlist::strip_all_heredoc_bodies(command);
-    has_file_write_redirect(&stripped, write_allow_paths, project_root)
+    disallowed_write_redirect_target(&stripped, write_allow_paths, project_root).is_some()
 }
 
 /// Detects shell redirect operators (`>` or `>>`) that write to files.
@@ -374,11 +388,34 @@ fn disallowed_tee_target(
     })
 }
 
+/// True when the command redirects into a path it may not write.
+///
+/// Test-only convenience: every production caller needs the offending target
+/// for its message and goes to [`disallowed_write_redirect_target`] directly
+/// (#1768). The assertions here only care about the verdict, and reading
+/// `.is_some()` into every one of them would obscure what they pin.
+#[cfg(test)]
 fn has_file_write_redirect(
     command: &str,
     write_allow_paths: &[String],
     project_root: Option<&str>,
 ) -> bool {
+    disallowed_write_redirect_target(command, write_allow_paths, project_root).is_some()
+}
+
+/// The first redirect target that is **not** write-allowed, or `None` when the
+/// command writes nowhere it may not.
+///
+/// Returns the target rather than a bare verdict so the refusal can name what
+/// tripped it (#1768) — the same reason [`disallowed_tee_target`] exists. A
+/// guard that states a rule the caller cannot map onto their own command gets
+/// read as something else (there, "piping"; here, "large payloads"), and every
+/// such misreading sends the caller somewhere that cannot help.
+fn disallowed_write_redirect_target(
+    command: &str,
+    write_allow_paths: &[String],
+    project_root: Option<&str>,
+) -> Option<String> {
     let bytes = command.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -459,12 +496,12 @@ fn has_file_write_redirect(
                 continue;
             }
             if !target.is_empty() {
-                return true;
+                return Some(target);
             }
         }
         i += 1;
     }
-    false
+    None
 }
 
 /// On Windows cmd.exe, `;` is not a valid command separator.
@@ -1417,5 +1454,72 @@ COMMIT_MSG"
                 "a file write must still be caught: {cmd}"
             );
         }
+    }
+
+    /// #1768: the refusal must state the rule that actually fired — the
+    /// destination — and must not offer a size rationale the guard does not
+    /// apply. The reporter's pair: two bytes into a project path is refused,
+    /// 1.3 MB into /tmp is allowed.
+    #[test]
+    fn redirect_refusal_names_the_destination_not_a_size() {
+        let allow = vec!["/tmp".to_string()];
+        let message = validate_command_with_write_allow_paths(
+            "printf 'x\n' >> /project/lc_probe.txt",
+            &allow,
+            Some("/project"),
+        )
+        .expect("a project-path redirect is refused");
+
+        assert!(
+            message.contains("/project/lc_probe.txt"),
+            "the refusal must name the target that tripped it: {message}"
+        );
+        assert!(
+            message.contains("destination decides"),
+            "the refusal must state the rule that fired: {message}"
+        );
+        for misleading in ["large payload", "large payloads", "protocol corruption"] {
+            assert!(
+                !message.contains(misleading),
+                "a size rationale must not survive — the guard never weighs size: {message}"
+            );
+        }
+        assert!(
+            message.contains("/tmp"),
+            "the reachable alternative must be named: {message}"
+        );
+
+        // The other half of the pair: a large capture into scratch stays
+        // allowed, so the message above cannot be read as "redirects are
+        // banned".
+        assert!(
+            validate_command_with_write_allow_paths(
+                "seq 1 200000 > /tmp/lc_probe_big.txt",
+                &allow,
+                Some("/project"),
+            )
+            .is_none(),
+            "a scratch capture must stay allowed regardless of payload size"
+        );
+    }
+
+    /// The target is reported verbatim, so a caller can match it against the
+    /// command they sent — including the `>>` form and a non-final segment.
+    #[test]
+    fn disallowed_redirect_target_is_reported_verbatim() {
+        assert_eq!(
+            disallowed_write_redirect_target("echo hi > out.txt", &[], None).as_deref(),
+            Some("out.txt")
+        );
+        assert_eq!(
+            disallowed_write_redirect_target("echo a; echo hi >> logs/run.log; echo b", &[], None)
+                .as_deref(),
+            Some("logs/run.log")
+        );
+        assert_eq!(
+            disallowed_write_redirect_target("echo x >&1", &[], None),
+            None,
+            "fd duplication names no file"
+        );
     }
 }
