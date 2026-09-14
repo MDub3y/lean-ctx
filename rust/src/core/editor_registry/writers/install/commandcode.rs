@@ -54,18 +54,30 @@ pub(crate) fn write_commandcode_config_with_rule_steering(
 
         let existing = servers_obj.get("lean-ctx").cloned();
 
-        // `auto_inject_rules=false` / `--skip-rules` means setup must not
-        // inject or refresh steering. Preserve an already-present instructions
-        // value rather than deleting user-visible state as a side effect of
-        // configuring the MCP transport.
+        // A setup-level opt-out (`auto_inject_rules=false` / `--skip-rules`)
+        // means "do not create or refresh steering", so existing instructions
+        // are preserved. `rules_injection=off` is stronger: remove only the
+        // lean-ctx-owned Command Code steering while leaving user-authored
+        // instructions untouched.
         if !allow_rule_steering
             && let Some(instructions) = existing
                 .as_ref()
                 .and_then(|entry| entry.get("instructions"))
                 .cloned()
-            && let Some(obj) = desired.as_object_mut()
         {
-            obj.insert("instructions".to_string(), instructions);
+            let rules_off = crate::core::config::Config::load().rules_injection_effective()
+                == crate::core::config::RulesInjection::Off;
+
+            let lean_ctx_owned = instructions.as_str().is_some_and(|text| {
+                text == crate::proxy_setup::COMMANDCODE_MCP_INSTRUCTIONS
+                    || text.starts_with("lean-ctx shadow mode:")
+            });
+
+            if !rules_off || !lean_ctx_owned {
+                if let Some(obj) = desired.as_object_mut() {
+                    obj.insert("instructions".to_string(), instructions);
+                }
+            }
         }
 
         if existing.as_ref() == Some(&desired) {

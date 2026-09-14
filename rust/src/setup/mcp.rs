@@ -30,7 +30,7 @@ pub fn setup_single_agent(
     let home = crate::core::home::resolve_home_dir().unwrap_or_default();
     let mut result = AgentSetupResult::default();
 
-    crate::hooks::install_agent_hook_with_mode(agent_name, global, mode);
+    crate::hooks::install_agent_hook_respecting_rules_off(agent_name, global, mode);
 
     // #281: honor `[setup] auto_update_mcp = false` — skip MCP registration but
     // still install the hook, rules and skill. Locked-down environments can keep

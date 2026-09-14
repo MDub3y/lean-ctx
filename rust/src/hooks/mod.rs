@@ -1116,12 +1116,29 @@ pub fn install_agent_hook_with_mode(agent: &str, global: bool, mode: HookMode) {
     }
 }
 
+/// Install an agent integration for an explicit setup/repair action.
+///
+/// `setup.auto_inject_rules=false` only disables automatic steering and may be
+/// overridden by an explicit action. `rules_injection=off` is the stronger
+/// policy boundary: even explicit setup/repair must retain only the functional
+/// runtime integration and must not recreate steering artifacts.
+pub(crate) fn install_agent_hook_respecting_rules_off(agent: &str, global: bool, mode: HookMode) {
+    if crate::core::config::Config::load().rules_injection_effective()
+        == crate::core::config::RulesInjection::Off
+    {
+        install_agent_runtime_hook_with_mode(agent, global, mode);
+    } else {
+        install_agent_hook_with_mode(agent, global, mode);
+    }
+}
+
 /// Install only the functional runtime integration for an agent.
 ///
 /// Unlike `install_agent_hook_with_mode`, this path must not create or
-/// register lean-ctx-authored rule/instruction files. `setup` uses it when
-/// rule steering was explicitly declined while explicit repair/setup actions
-/// continue to use the full installer.
+/// register lean-ctx-authored rule/instruction files. Automatic `setup` uses
+/// it whenever steering is declined; explicit setup/repair reaches it through
+/// `install_agent_hook_respecting_rules_off` only for the stronger
+/// `rules_injection=off` policy.
 pub(crate) fn install_agent_runtime_hook_with_mode(agent: &str, global: bool, mode: HookMode) {
     let home = crate::core::home::resolve_home_dir().unwrap_or_default();
 

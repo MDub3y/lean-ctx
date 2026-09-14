@@ -141,6 +141,63 @@ fn runtime_hook_refresh_does_not_write_rule_files() {
     );
 }
 
+#[test]
+fn explicit_hook_policy_respects_absolute_rules_off() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let copilot_home = home.join(".copilot");
+
+    let _home_guard = crate::setup::EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+    let _profile_guard =
+        crate::setup::EnvVarGuard::set("USERPROFILE", home.to_string_lossy().as_ref());
+    let _copilot_guard =
+        crate::setup::EnvVarGuard::set("COPILOT_HOME", copilot_home.to_string_lossy().as_ref());
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "off");
+
+    install_agent_hook_respecting_rules_off("copilot", true, HookMode::Hybrid);
+
+    assert!(
+        copilot_home.join("hooks/hooks.json").exists(),
+        "absolute off must retain the functional Copilot runtime hook"
+    );
+    assert!(
+        !home.join(".copilot/instructions.md").exists(),
+        "explicit setup/repair must not recreate Copilot steering under rules_injection=off"
+    );
+}
+
+#[test]
+fn explicit_hook_policy_keeps_auto_false_overrideable() {
+    let _env_lock = crate::core::data_dir::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let config_dir = home.join("lean-ctx-config");
+
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[setup]\nauto_inject_rules = false\nauto_update_mcp = false\n",
+    )
+    .unwrap();
+
+    let _home_guard = crate::setup::EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+    let _profile_guard =
+        crate::setup::EnvVarGuard::set("USERPROFILE", home.to_string_lossy().as_ref());
+    let _config_guard = crate::setup::EnvVarGuard::set(
+        "LEAN_CTX_CONFIG_DIR",
+        config_dir.to_string_lossy().as_ref(),
+    );
+    let _rules_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+
+    install_agent_hook_respecting_rules_off("copilot", true, HookMode::Hybrid);
+
+    assert!(
+        home.join(".copilot/instructions.md").exists(),
+        "an explicit setup/repair action may override setup.auto_inject_rules=false"
+    );
+}
+
 // ── #555: .github/copilot-instructions.md ──────────────────────────────
 
 #[test]

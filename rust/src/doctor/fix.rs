@@ -274,7 +274,7 @@ fn build_and_persist_fix_report(
             continue;
         }
         let mode = crate::hooks::recommend_hook_mode(&t.agent_key);
-        crate::hooks::install_agent_hook_with_mode(&t.agent_key, true, mode);
+        crate::hooks::install_agent_hook_respecting_rules_off(&t.agent_key, true, mode);
         hooks_step.items.push(SetupItem {
             name: format!("{} hooks", t.name),
             status: "installed".to_string(),
