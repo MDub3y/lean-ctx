@@ -26,7 +26,7 @@ pub fn run_setup_with_options(opts: SetupOptions) -> Result<SetupReport, String>
     let cfg = crate::core::config::Config::load();
     let update_mcp = cfg.setup.should_update_mcp();
     let should_inject = should_inject_rules(opts, cfg.setup.should_inject_rules());
-    let allow_rule_steering = should_allow_rule_steering(opts, &cfg, should_inject);
+    let allow_rule_steering = should_allow_rule_steering(opts, &cfg);
     let should_install_skills = should_inject_skills(opts, cfg.setup.should_inject_skills());
 
     let mut steps = vec![
@@ -261,11 +261,7 @@ fn should_inject_rules(opts: SetupOptions, config_value: bool) -> bool {
     }
 }
 
-fn should_allow_rule_steering(
-    opts: SetupOptions,
-    cfg: &crate::core::config::Config,
-    should_inject: bool,
-) -> bool {
+fn should_allow_rule_steering(opts: SetupOptions, cfg: &crate::core::config::Config) -> bool {
     // `rules_injection=off` is absolute: #1599 established "off means off,
     // on every channel". The setup force flag must not resurrect steering.
     if cfg.rules_injection_effective() == crate::core::config::RulesInjection::Off {
@@ -283,7 +279,10 @@ fn should_allow_rule_steering(
         return true;
     }
 
-    should_inject && !cfg.declines_rule_steering()
+    // A fresh/default setup may intentionally skip standalone rule files,
+    // but None is not an explicit steering opt-out. Only the central
+    // decline policy (or the stronger gates above) should suppress steering.
+    !cfg.declines_rule_steering()
 }
 
 fn should_inject_skills(opts: SetupOptions, config_value: bool) -> bool {
@@ -684,11 +683,7 @@ mod rule_steering_policy_tests {
         let mut cfg = crate::core::config::Config::default();
         cfg.setup.auto_inject_rules = Some(false);
 
-        assert!(!should_allow_rule_steering(
-            SetupOptions::default(),
-            &cfg,
-            true,
-        ));
+        assert!(!should_allow_rule_steering(SetupOptions::default(), &cfg));
     }
 
     #[test]
@@ -702,14 +697,14 @@ mod rule_steering_policy_tests {
         cfg.setup.auto_inject_rules = Some(false);
 
         assert!(
-            should_allow_rule_steering(force, &cfg, true),
+            should_allow_rule_steering(force, &cfg),
             "--force-inject-rules must override setup.auto_inject_rules=false"
         );
 
         cfg.rules_injection = Some("off".to_string());
 
         assert!(
-            !should_allow_rule_steering(force, &cfg, true),
+            !should_allow_rule_steering(force, &cfg),
             "rules_injection=off remains absolute even with force"
         );
     }
@@ -724,17 +719,16 @@ mod rule_steering_policy_tests {
 
         let cfg = crate::core::config::Config::default();
 
-        assert!(!should_allow_rule_steering(opts, &cfg, true));
+        assert!(!should_allow_rule_steering(opts, &cfg));
     }
 
     #[test]
-    fn default_and_explicit_true_allow_setup_steering() {
+    fn default_none_and_explicit_true_allow_setup_steering() {
         let default_cfg = crate::core::config::Config::default();
 
         assert!(should_allow_rule_steering(
             SetupOptions::default(),
-            &default_cfg,
-            true,
+            &default_cfg
         ));
 
         let mut explicit_true = crate::core::config::Config::default();
@@ -742,8 +736,7 @@ mod rule_steering_policy_tests {
 
         assert!(should_allow_rule_steering(
             SetupOptions::default(),
-            &explicit_true,
-            true,
+            &explicit_true
         ));
     }
 }
