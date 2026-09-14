@@ -30,7 +30,7 @@ pub(crate) fn uninstall_codex_env(home: &Path, quiet: bool) {
 /// touching Claude/Pi/shell exports. The opt-in is resolved from `config.toml`
 /// (env-independent), so this works for the env-less managed proxy and every
 /// later setup pass too (#603/#616).
-pub(crate) fn install_codex_env(home: &Path, port: u16, quiet: bool) {
+pub(crate) fn install_codex_env(home: &Path, port: u16, quiet: bool) -> CodexEnvOutcome {
     let config_dir = crate::core::home::resolve_codex_dir().unwrap_or_else(|| home.join(".codex"));
     let mode = if codex_uses_chatgpt_login(home) {
         CodexProxyMode::ChatGpt
@@ -46,7 +46,7 @@ pub(crate) fn install_codex_env(home: &Path, port: u16, quiet: bool) {
         .codex_chatgpt_proxy_enabled();
     let config_path = crate::core::home::resolve_codex_config_path()
         .unwrap_or_else(|| config_dir.join("config.toml"));
-    install_codex_env_at_path(&config_path, port, quiet, mode, chatgpt_proxy);
+    install_codex_env_at_path(&config_path, port, quiet, mode, chatgpt_proxy)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,14 +70,34 @@ pub(crate) fn install_codex_env_at_mode(
     quiet: bool,
     mode: CodexProxyMode,
     chatgpt_proxy: bool,
-) {
+) -> CodexEnvOutcome {
     install_codex_env_at_path(
         &config_dir.join("config.toml"),
         port,
         quiet,
         mode,
         chatgpt_proxy,
-    );
+    )
+}
+
+/// What a Codex-env install pass actually did (#1775).
+///
+/// `codex chatgpt on` printed its green "enabled" line *before* calling the
+/// installer, so a write that was skipped because the proxy was down still read
+/// as success. Returning the outcome lets the caller report what happened rather
+/// than what it intended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexEnvOutcome {
+    /// Codex's config was rewritten on disk.
+    Written,
+    /// The desired entries were already present.
+    AlreadyConfigured,
+    /// ChatGPT login without the opt-in — staying native is the intended state.
+    LeftNative,
+    /// Nothing written: the proxy was not reachable.
+    SkippedProxyDown,
+    /// Nothing written: no Codex config directory exists.
+    NoConfigDir,
 }
 
 fn install_codex_env_at_path(
@@ -86,7 +106,7 @@ fn install_codex_env_at_path(
     quiet: bool,
     mode: CodexProxyMode,
     chatgpt_proxy: bool,
-) {
+) -> CodexEnvOutcome {
     // API-key Codex is billed per token, so routing it through the proxy's `/v1`
     // rail is where compression actually saves money. Codex reads the built-in
     // OpenAI provider's base URL from the top-level `openai_base_url` key
@@ -125,11 +145,11 @@ fn install_codex_env_at_path(
         if !quiet {
             println!("  Skipping Codex CLI proxy env (proxy not running on port {port})");
         }
-        return;
+        return CodexEnvOutcome::SkippedProxyDown;
     }
 
     if !config_path.parent().is_some_and(std::path::Path::exists) {
-        return;
+        return CodexEnvOutcome::NoConfigDir;
     }
 
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
@@ -146,7 +166,11 @@ fn install_codex_env_at_path(
                 println!("  Codex CLI proxy env already configured");
             }
         }
-        return;
+        return if entries.is_empty() {
+            CodexEnvOutcome::LeftNative
+        } else {
+            CodexEnvOutcome::AlreadyConfigured
+        };
     }
 
     let _ = std::fs::write(config_path, &updated);
@@ -163,6 +187,9 @@ fn install_codex_env_at_path(
             ),
         }
     }
+    // Reaching here means the file changed — including the `entries.is_empty()`
+    // case, which strips stale lean-ctx entries. That is a write, not a no-op.
+    CodexEnvOutcome::Written
 }
 
 /// Point Codex's built-in OpenAI provider at `value` via the documented top-level

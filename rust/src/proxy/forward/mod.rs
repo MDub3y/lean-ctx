@@ -79,6 +79,55 @@ pub(super) fn max_body_bytes() -> usize {
         .saturating_mul(1024 * 1024)
 }
 
+/// Appends lean-ctx's diagnosis to an upstream `401 … insufficient permissions`
+/// body (#1774), preserving the original text byte for byte.
+///
+/// Any other 401 — a revoked key, a genuine organization-permission problem —
+/// passes through untouched: guessing at those would be worse than staying quiet.
+async fn annotate_openai_scope_401(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, max_body_bytes()).await else {
+        return Response::from_parts(parts, Body::empty());
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    if !text.contains("api.responses.write") && !text.contains("insufficient permissions") {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    let hint = "lean-ctx: this looks like a ChatGPT subscription token sent to the OpenAI \
+                platform API. api.openai.com accepts API keys only, so it reports a missing \
+                scope rather than the real cause. Codex with a ChatGPT login belongs on the \
+                subscription rail: run `lean-ctx proxy codex-chatgpt on` with the proxy \
+                running. If you meant to use an API key, set OPENAI_API_KEY.";
+    let annotated = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(mut doc) => {
+            if let Some(error) = doc.get_mut("error").and_then(|e| e.as_object_mut()) {
+                let message = error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                if let Some(message) = message {
+                    error.insert(
+                        "message".to_string(),
+                        serde_json::Value::String(format!("{message}\n\n{hint}")),
+                    );
+                }
+                error.insert(
+                    "lean_ctx_hint".to_string(),
+                    serde_json::Value::String(hint.to_string()),
+                );
+            }
+            serde_json::to_vec(&doc).unwrap_or_else(|_| bytes.to_vec())
+        }
+        Err(_) => format!("{text}\n\n{hint}").into_bytes(),
+    };
+    // The body length changed. `build_response` never forwards content-length,
+    // but drop it defensively so no stale value can survive.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(annotated))
+}
+
 fn apply_ocla_budget_admission(
     parts: &axum::http::request::Parts,
     estimated_bytes: usize,
@@ -678,6 +727,21 @@ pub async fn forward_request(
         &cache_prompt_hash,
     )
     .await?;
+
+    // #1774: OpenAI answers a ChatGPT-subscription OAuth token on the platform
+    // `/v1` rail with `Missing scopes: api.responses.write` — a message about
+    // organization roles and API-key scopes that sends people hunting through
+    // their OpenAI settings for a permission that was never the problem. The real
+    // cause is the rail: a subscription token only authenticates against
+    // chatgpt.com.
+    //
+    // Re-routing here is not an option — OpenCode's own ChatGPT-OAuth plugin
+    // legitimately uses this same path, and `/v1` was added to OPENAI_BASE_URL
+    // precisely so that plugin matches (#366). So name the cause instead, and
+    // append it: the upstream text is preserved byte for byte.
+    if provider_label == "OpenAI" && response.status() == StatusCode::UNAUTHORIZED {
+        response = annotate_openai_scope_401(response).await;
+    }
     #[cfg(feature = "enterprise")]
     if let Some(model) = _thompson_model.as_deref() {
         let router = crate::core::model_router::global_model_router();

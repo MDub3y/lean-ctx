@@ -12,6 +12,84 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+/// #1774: the scope-error annotation must add lean-ctx's diagnosis without
+/// discarding a byte of the upstream text, and must leave every other 401 alone.
+#[tokio::test]
+async fn scope_401_is_annotated_without_losing_the_upstream_message() {
+    let body = serde_json::json!({
+        "error": {
+            "message": "You have insufficient permissions for this operation. Missing scopes: api.responses.write.",
+            "type": "invalid_request_error"
+        }
+    });
+    let response = Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+        .expect("response");
+
+    let annotated = annotate_openai_scope_401(response).await;
+    assert_eq!(annotated.status(), StatusCode::UNAUTHORIZED);
+    let bytes = to_bytes(annotated.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+
+    assert!(
+        text.contains("Missing scopes: api.responses.write"),
+        "the upstream message must survive verbatim, got: {text}"
+    );
+    assert!(
+        text.contains("codex-chatgpt on"),
+        "the annotation must name the actual remedy, got: {text}"
+    );
+    assert!(
+        text.contains("lean_ctx_hint"),
+        "the hint must also be machine-readable, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn unrelated_401_passes_through_untouched() {
+    let original = br#"{"error":{"message":"Incorrect API key provided."}}"#.to_vec();
+    let response = Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(Body::from(original.clone()))
+        .expect("response");
+
+    let passed = annotate_openai_scope_401(response).await;
+    let bytes = to_bytes(passed.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(
+        bytes.to_vec(),
+        original,
+        "a 401 that is not the scope error must not be rewritten"
+    );
+}
+
+#[tokio::test]
+async fn non_json_scope_401_still_gets_the_hint_appended() {
+    let response = Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(Body::from("insufficient permissions, see docs"))
+        .expect("response");
+
+    let annotated = annotate_openai_scope_401(response).await;
+    let bytes = to_bytes(annotated.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+    assert!(
+        text.starts_with("insufficient permissions, see docs"),
+        "the original body must come first, got: {text}"
+    );
+    assert!(
+        text.contains("codex-chatgpt on"),
+        "the hint must be appended, got: {text}"
+    );
+}
+
 struct SpyIntentClassifier(Arc<AtomicUsize>);
 
 impl OclaService for SpyIntentClassifier {

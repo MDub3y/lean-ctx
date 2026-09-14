@@ -5,6 +5,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — `proxy enable` wires clients on platforms without autostart (#1773)
+
+- `proxy_autostart::install` has backends for macOS (launchd) and Linux
+  (systemd) only, so on Windows it always returned `false` — and `proxy enable`
+  exited on that failure *before* `install_proxy_env_unchecked`, so not one
+  client config was ever written. The error then recommended
+  `lean-ctx proxy start`, which wires nothing either, leaving the documented
+  path unable to produce a working setup on Windows at all. The service and the
+  wiring are now separate: clients are wired first, and the service outcome
+  decides only the report and the exit status. A manually started proxy is a
+  success, not a failure. When nothing is serving the port the command still
+  fails — and now says plainly that no config was written, because both
+  `install_shell_exports` and `install_codex_env` refuse to write against an
+  unreachable proxy.
+
+### Fixed — an OpenAI `401` scope error names its real cause (#1774)
+
+- A ChatGPT-subscription token sent to the OpenAI platform `/v1` rail comes back
+  as `Missing scopes: api.responses.write` — a message about organization roles
+  and API-key scopes that sends people hunting through OpenAI settings for a
+  permission that was never the problem. The proxy cannot re-route the request
+  (OpenCode's own ChatGPT-OAuth plugin uses that same path, and `/v1` was added
+  to `OPENAI_BASE_URL` precisely so it matches, #366), so it now appends the
+  actual cause and the remedy to the error body, preserving the upstream text
+  byte for byte. Only a 401 whose body carries that signature is annotated; a
+  revoked key or a genuine org-permission failure passes through untouched.
+
+### Fixed — `codex-chatgpt on` reports what it wrote, not what it intended (#1775)
+
+- The command printed a green `✓ … enabled` before the installer ran, so a write
+  skipped against an unreachable proxy still read as success while the opt-in
+  flag really had been persisted — a half-applied state that looked complete.
+  The installer now returns what it did (written, already configured, left
+  native, skipped because the proxy is down, skipped because there is no Codex
+  config directory) and the command reports that outcome, with the two-step
+  recovery spelled out when nothing was written.
+
+### Fixed — `ctx_shell` refuses protected `env` keys instead of dropping them (#1771)
+
+- The inline-override refusal points callers at the `env` parameter and uses
+  `PATH` as its worked example, but five of the nine variables it blocks inline
+  (`PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`)
+  are also rejected by `env` — silently. The recommended recovery therefore ran
+  the command with the inherited value and reported success: a wrong result that
+  looks right, which is worse than the refusal it replaced. `env` now refuses
+  such a call outright, naming every rejected key, and the command does not run.
+
 ### Fixed — `ctx_patch` batch receipt accounts for every op (#1767)
 
 - A batch receipt stated only a total (`10 anchored edits`), so a caller could
