@@ -360,7 +360,9 @@ pub fn check_rules_freshness(client_name: &str) -> Option<String> {
 
 fn check_rules_freshness_at_home(client_name: &str, home: &std::path::Path) -> Option<String> {
     let cfg = crate::core::config::Config::load();
-    if cfg.declines_rule_steering() {
+    if cfg.declines_rule_steering()
+        || cfg.rules_scope_effective() == crate::core::config::RulesScope::Project
+    {
         return None;
     }
     let injection = cfg.rules_injection_effective();
@@ -376,6 +378,11 @@ fn check_rules_freshness_at_home(client_name: &str, home: &std::path::Path) -> O
     }
 
     for target in &matched {
+        // Keep freshness eligibility identical to inject_all_rules(): never
+        // advertise an automatic repair for a target the writer would skip.
+        if !is_tool_detected(target, home) || !detect::is_mcp_configured(target, home) {
+            continue;
+        }
         if !target.path.exists() {
             continue;
         }

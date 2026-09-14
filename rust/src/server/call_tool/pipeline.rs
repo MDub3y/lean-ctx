@@ -2,6 +2,24 @@
 use super::super::*;
 use super::finalize_call_result;
 
+pub(super) fn append_rules_self_heal_status(
+    result_text: String,
+    heal_result: Option<&crate::rules_inject::InjectResult>,
+) -> String {
+    let Some(heal_result) = heal_result else {
+        return result_text;
+    };
+
+    if !heal_result.errors.is_empty() || heal_result.updated.is_empty() {
+        return result_text;
+    }
+
+    format!(
+        "{result_text}\n\n[RULES AUTO-UPDATED] Your lean-ctx rules were written by \
+         an older version and have been refreshed on disk. Start a new session to \
+         load them for full compatibility."
+    )
+}
 #[allow(clippy::too_many_arguments)]
 pub(in crate::server) async fn dispatch_and_post_process(
     server: &LeanCtxServer,
@@ -627,17 +645,14 @@ pub(in crate::server) async fn dispatch_and_post_process(
             // Self-heal: auto-refresh the rules on disk instead of asking
             // the user to run setup manually (#2365). The rewrite is
             // idempotent and cheap; run it off the async runtime.
-            let _ = tokio::task::spawn_blocking(|| {
-                if let Some(home) = dirs::home_dir() {
-                    let _ = crate::rules_inject::inject_all_rules(&home);
-                }
+            let heal_result = tokio::task::spawn_blocking(|| {
+                dirs::home_dir().map(|home| crate::rules_inject::inject_all_rules(&home))
             })
-            .await;
-            result_text = format!(
-                "{result_text}\n\n[RULES AUTO-UPDATED] Your lean-ctx rules were written by \
-                     an older version and have been refreshed on disk. Start a new session to \
-                     load them for full compatibility."
-            );
+            .await
+            .ok()
+            .flatten();
+
+            result_text = append_rules_self_heal_status(result_text, heal_result.as_ref());
         } else if !server
             .rules_tip_shown
             .swap(true, std::sync::atomic::Ordering::Relaxed)

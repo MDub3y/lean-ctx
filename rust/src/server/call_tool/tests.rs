@@ -6,6 +6,81 @@ use super::{finalize_call_result, roots_list_failure_is_permanent};
 /// ignored — triage ran after the compression pipeline, so per-call
 /// parameters never reached it. These pins guarantee the bypass contract
 /// stays wired at the dispatch chokepoint.
+mod rules_self_heal_status_tests {
+    use super::super::pipeline::append_rules_self_heal_status;
+
+    #[test]
+    fn failed_rule_write_must_not_claim_auto_updated() {
+        let failed = crate::rules_inject::InjectResult {
+            errors: vec!["Cursor: simulated write failure".to_string()],
+            ..Default::default()
+        };
+
+        let result = append_rules_self_heal_status("tool output".to_string(), Some(&failed));
+
+        assert!(
+            !result.contains("[RULES AUTO-UPDATED]"),
+            "a failed rules write must never be reported as successfully refreshed, got: {result}"
+        );
+    }
+
+    #[test]
+    fn successful_rule_write_claims_auto_updated() {
+        let updated = crate::rules_inject::InjectResult {
+            updated: vec!["Cursor".to_string()],
+            ..Default::default()
+        };
+
+        let result = append_rules_self_heal_status("tool output".to_string(), Some(&updated));
+
+        assert!(
+            result.contains("[RULES AUTO-UPDATED]"),
+            "a successful rules rewrite must retain the existing success notice, got: {result}"
+        );
+    }
+
+    #[test]
+    fn already_current_rules_do_not_claim_auto_updated() {
+        let already = crate::rules_inject::InjectResult {
+            already: vec!["Cursor".to_string()],
+            ..Default::default()
+        };
+
+        let result = append_rules_self_heal_status("tool output".to_string(), Some(&already));
+
+        assert!(
+            !result.contains("[RULES AUTO-UPDATED]"),
+            "AlreadyPresent is not a write and must not be described as one, got: {result}"
+        );
+    }
+
+    #[test]
+    fn missing_heal_result_does_not_claim_auto_updated() {
+        let result = append_rules_self_heal_status("tool output".to_string(), None);
+
+        assert!(
+            !result.contains("[RULES AUTO-UPDATED]"),
+            "missing home or a failed blocking task must not be reported as a successful rewrite, got: {result}"
+        );
+    }
+
+    #[test]
+    fn partial_rule_write_failure_must_not_claim_auto_updated() {
+        let heal_result = crate::rules_inject::InjectResult {
+            updated: vec!["Cursor".to_string()],
+            errors: vec!["OpenCode: simulated write failure".to_string()],
+            ..Default::default()
+        };
+
+        let output = super::super::pipeline::append_rules_self_heal_status(
+            "original result".to_string(),
+            Some(&heal_result),
+        );
+
+        assert_eq!(output, "original result");
+        assert!(!output.contains("[RULES AUTO-UPDATED]"));
+    }
+}
 mod triage_bypass_tests {
     use super::super::pipeline::triage_bypass_requested;
 
