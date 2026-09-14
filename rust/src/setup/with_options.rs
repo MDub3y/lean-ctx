@@ -7,7 +7,7 @@ use crate::hooks::{HookMode, recommend_hook_mode};
 
 use super::helpers::shorten_path;
 use super::index_build::{may_autoindex_cwd, spawn_index_build_background};
-use super::mcp::configure_agent_mcp;
+use super::mcp::configure_agent_mcp_with_rule_steering;
 use super::options::SetupOptions;
 
 pub fn run_setup_with_options(opts: SetupOptions) -> Result<SetupReport, String> {
@@ -23,15 +23,23 @@ pub fn run_setup_with_options(opts: SetupOptions) -> Result<SetupReport, String>
     crate::core::layout_pin::heal();
 
     let targets = crate::core::editor_registry::build_targets(&home);
-    let setup_cfg = crate::core::config::Config::load().setup;
-    let update_mcp = setup_cfg.should_update_mcp();
-    let should_inject = should_inject_rules(opts, setup_cfg.should_inject_rules());
-    let should_install_skills = should_inject_skills(opts, setup_cfg.should_inject_skills());
+    let cfg = crate::core::config::Config::load();
+    let update_mcp = cfg.setup.should_update_mcp();
+    let should_inject = should_inject_rules(opts, cfg.setup.should_inject_rules());
+    let allow_rule_steering = should_allow_rule_steering(opts, &cfg, should_inject);
+    let should_install_skills = should_inject_skills(opts, cfg.setup.should_inject_skills());
 
     let mut steps = vec![
         build_shell_hook_step(opts, &binary),
         build_daemon_step(),
-        build_editor_step(opts, &home_str, &binary, &targets, update_mcp),
+        build_editor_step(
+            opts,
+            &home_str,
+            &binary,
+            &targets,
+            update_mcp,
+            allow_rule_steering,
+        ),
         build_rules_step(opts, &home, should_inject),
     ];
 
@@ -41,7 +49,7 @@ pub fn run_setup_with_options(opts: SetupOptions) -> Result<SetupReport, String>
     if let Some(step) = build_skill_step(&home, should_install_skills) {
         steps.push(step);
     }
-    if let Some(step) = build_agent_hooks_step(&targets, update_mcp) {
+    if let Some(step) = build_agent_hooks_step(&targets, update_mcp, allow_rule_steering) {
         steps.push(step);
     }
 
@@ -169,6 +177,7 @@ fn build_editor_step(
     binary: &str,
     targets: &[EditorTarget],
     update_mcp: bool,
+    allow_rule_steering: bool,
 ) -> SetupStepReport {
     let mut editor_step = setup_step("editors");
     for target in targets {
@@ -201,12 +210,13 @@ fn build_editor_step(
             continue;
         }
 
-        let res = crate::core::editor_registry::write_config_with_options(
+        let res = crate::core::editor_registry::write_config_with_options_and_rule_steering(
             target,
             binary,
             WriteOptions {
                 overwrite_invalid: opts.fix,
             },
+            allow_rule_steering,
         );
         match res {
             Ok(w) => {
@@ -249,6 +259,31 @@ fn should_inject_rules(opts: SetupOptions, config_value: bool) -> bool {
     } else {
         true
     }
+}
+
+fn should_allow_rule_steering(
+    opts: SetupOptions,
+    cfg: &crate::core::config::Config,
+    should_inject: bool,
+) -> bool {
+    // `rules_injection=off` is absolute: #1599 established "off means off,
+    // on every channel". The setup force flag must not resurrect steering.
+    if cfg.rules_injection_effective() == crate::core::config::RulesInjection::Off {
+        return false;
+    }
+
+    // An explicit skip wins even if the caller also passed force.
+    if opts.skip_rules {
+        return false;
+    }
+
+    // `--force-inject-rules` explicitly overrides setup.auto_inject_rules=false,
+    // but not the stronger rules_injection=off policy above.
+    if opts.force_inject_rules {
+        return true;
+    }
+
+    should_inject && !cfg.declines_rule_steering()
 }
 
 fn should_inject_skills(opts: SetupOptions, config_value: bool) -> bool {
@@ -364,22 +399,35 @@ fn build_skill_step(
     (!skill_step.items.is_empty()).then_some(skill_step)
 }
 
-fn build_agent_hooks_step(targets: &[EditorTarget], update_mcp: bool) -> Option<SetupStepReport> {
+fn build_agent_hooks_step(
+    targets: &[EditorTarget],
+    update_mcp: bool,
+    allow_rule_steering: bool,
+) -> Option<SetupStepReport> {
     let mut hooks_step = setup_step("agent_hooks");
+
     for target in targets {
         if !target.detect_path.exists() || target.agent_key.is_empty() {
             continue;
         }
+
         let mode = recommend_hook_mode(&target.agent_key);
-        crate::hooks::install_agent_hook_with_mode(&target.agent_key, true, mode);
+
+        if allow_rule_steering {
+            crate::hooks::install_agent_hook_with_mode(&target.agent_key, true, mode);
+        } else {
+            crate::hooks::install_agent_runtime_hook_with_mode(&target.agent_key, true, mode);
+        }
+
         let mcp_note = if update_mcp {
-            match configure_agent_mcp(&target.agent_key) {
+            match configure_agent_mcp_with_rule_steering(&target.agent_key, allow_rule_steering) {
                 Ok(()) => "; MCP config updated".to_string(),
                 Err(e) => format!("; MCP config skipped: {e}"),
             }
         } else {
             "; MCP registration skipped (auto_update_mcp=false)".to_string()
         };
+
         hooks_step.items.push(SetupItem {
             name: format!("{} hooks", target.name),
             status: "installed".to_string(),
@@ -389,6 +437,7 @@ fn build_agent_hooks_step(targets: &[EditorTarget], update_mcp: bool) -> Option<
             )),
         });
     }
+
     (!hooks_step.items.is_empty()).then_some(hooks_step)
 }
 
@@ -581,4 +630,120 @@ fn persist_setup_report(report: &SetupReport) -> Result<(), String> {
         serde_json::to_string_pretty(report).map_err(|e| format!("serialize report: {e}"))?;
     content.push('\n');
     crate::config_io::write_atomic(&path, &content)
+}
+
+#[cfg(test)]
+mod rule_steering_policy_tests {
+    use super::*;
+
+    #[test]
+    fn editor_step_respects_commandcode_rule_steering_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let detect = tmp.path().join("commandcode");
+        let config = detect.join("mcp.json");
+
+        std::fs::create_dir_all(&detect).unwrap();
+
+        let target = EditorTarget {
+            name: "Command Code",
+            agent_key: "commandcode".to_string(),
+            detect_path: detect,
+            config_path: config.clone(),
+            config_type: crate::core::editor_registry::ConfigType::CommandCode,
+        };
+
+        let report = build_editor_step(
+            SetupOptions::default(),
+            tmp.path().to_string_lossy().as_ref(),
+            "lean-ctx",
+            &[target],
+            true,
+            false,
+        );
+
+        assert!(
+            report.ok,
+            "editor setup should configure MCP successfully: {:?}",
+            report.errors
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
+
+        let entry = &json["mcpServers"]["lean-ctx"];
+
+        assert_eq!(entry["command"], "lean-ctx");
+        assert!(
+            entry.get("instructions").is_none(),
+            "the first setup editor writer must not bypass the steering opt-out"
+        );
+    }
+
+    #[test]
+    fn explicit_auto_false_declines_setup_steering() {
+        let mut cfg = crate::core::config::Config::default();
+        cfg.setup.auto_inject_rules = Some(false);
+
+        assert!(!should_allow_rule_steering(
+            SetupOptions::default(),
+            &cfg,
+            true,
+        ));
+    }
+
+    #[test]
+    fn force_overrides_auto_false_but_not_rules_off() {
+        let force = SetupOptions {
+            force_inject_rules: true,
+            ..Default::default()
+        };
+
+        let mut cfg = crate::core::config::Config::default();
+        cfg.setup.auto_inject_rules = Some(false);
+
+        assert!(
+            should_allow_rule_steering(force, &cfg, true),
+            "--force-inject-rules must override setup.auto_inject_rules=false"
+        );
+
+        cfg.rules_injection = Some("off".to_string());
+
+        assert!(
+            !should_allow_rule_steering(force, &cfg, true),
+            "rules_injection=off remains absolute even with force"
+        );
+    }
+
+    #[test]
+    fn skip_rules_wins_over_force() {
+        let opts = SetupOptions {
+            skip_rules: true,
+            force_inject_rules: true,
+            ..Default::default()
+        };
+
+        let cfg = crate::core::config::Config::default();
+
+        assert!(!should_allow_rule_steering(opts, &cfg, true));
+    }
+
+    #[test]
+    fn default_and_explicit_true_allow_setup_steering() {
+        let default_cfg = crate::core::config::Config::default();
+
+        assert!(should_allow_rule_steering(
+            SetupOptions::default(),
+            &default_cfg,
+            true,
+        ));
+
+        let mut explicit_true = crate::core::config::Config::default();
+        explicit_true.setup.auto_inject_rules = Some(true);
+
+        assert!(should_allow_rule_steering(
+            SetupOptions::default(),
+            &explicit_true,
+            true,
+        ));
+    }
 }

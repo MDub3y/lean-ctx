@@ -5,19 +5,27 @@ use super::super::shared::*;
 use super::super::{WriteAction, WriteOptions, WriteResult};
 use crate::core::editor_registry::types::EditorTarget;
 
-pub(crate) fn write_commandcode_config(
+pub(crate) fn write_commandcode_config_with_rule_steering(
     target: &EditorTarget,
     binary: &str,
     opts: WriteOptions,
+    allow_rule_steering: bool,
 ) -> Result<WriteResult, String> {
-    // Command Code schema: transport/enabled/command/instructions (see
-    // proxy_setup::commandcode).
-    let desired = serde_json::json!({
+    // Command Code is unusual: model steering lives directly inside the MCP
+    // server entry. Setup may therefore need to configure MCP without creating
+    // or refreshing that steering.
+    let mut desired = serde_json::json!({
         "transport": "stdio",
         "enabled": true,
         "command": binary,
-        "instructions": crate::proxy_setup::COMMANDCODE_MCP_INSTRUCTIONS,
     });
+
+    if allow_rule_steering && let Some(obj) = desired.as_object_mut() {
+        obj.insert(
+            "instructions".to_string(),
+            serde_json::Value::String(crate::proxy_setup::COMMANDCODE_MCP_INSTRUCTIONS.to_string()),
+        );
+    }
 
     if target.config_path.exists() {
         let content = std::fs::read_to_string(&target.config_path).map_err(|e| e.to_string())?;
@@ -45,6 +53,21 @@ pub(crate) fn write_commandcode_config(
             .ok_or_else(|| "\"mcpServers\" must be an object".to_string())?;
 
         let existing = servers_obj.get("lean-ctx").cloned();
+
+        // `auto_inject_rules=false` / `--skip-rules` means setup must not
+        // inject or refresh steering. Preserve an already-present instructions
+        // value rather than deleting user-visible state as a side effect of
+        // configuring the MCP transport.
+        if !allow_rule_steering
+            && let Some(instructions) = existing
+                .as_ref()
+                .and_then(|entry| entry.get("instructions"))
+                .cloned()
+            && let Some(obj) = desired.as_object_mut()
+        {
+            obj.insert("instructions".to_string(), instructions);
+        }
+
         if existing.as_ref() == Some(&desired) {
             return Ok(WriteResult {
                 action: WriteAction::Already,

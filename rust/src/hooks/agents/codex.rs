@@ -4,6 +4,18 @@ use super::super::{
     upsert_lean_ctx_codex_hook_entries, write_file,
 };
 
+pub(crate) fn install_codex_runtime_hook() {
+    let Some(codex_dir) = crate::core::home::resolve_codex_dir() else {
+        tracing::error!("Cannot resolve codex directory");
+        return;
+    };
+    if !ensure_state_dir(&codex_dir) {
+        return;
+    }
+
+    let _ = install_codex_hook_config(&codex_dir);
+}
+
 pub fn install_codex_hook() {
     let Some(codex_dir) = crate::core::home::resolve_codex_dir() else {
         tracing::error!("Cannot resolve codex directory");

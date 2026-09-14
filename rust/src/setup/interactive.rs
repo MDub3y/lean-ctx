@@ -50,6 +50,9 @@ pub fn run_setup() {
     let (inject_rules, inject_skills) = first_run_setup_level();
     persist_setup_choice(inject_rules, inject_skills);
 
+    let allow_rule_steering =
+        inject_rules && !crate::core::config::Config::load().declines_rule_steering();
+
     terminal_ui::print_step_header(1, 13, "Shell Hook");
     crate::cli::cmd_init(&["--global".to_string()]);
     crate::shell_hook::install_all(false);
@@ -104,12 +107,13 @@ pub fn run_setup() {
             recommend_hook_mode(&target.agent_key)
         };
 
-        match crate::core::editor_registry::write_config_with_options(
+        match crate::core::editor_registry::write_config_with_options_and_rule_steering(
             target,
             &binary,
             WriteOptions {
                 overwrite_invalid: false,
             },
+            allow_rule_steering,
         ) {
             Ok(res) if res.action == WriteAction::Already => {
                 terminal_ui::print_status_ok(&format!(
@@ -188,8 +192,14 @@ pub fn run_setup() {
         if !target.detect_path.exists() || target.agent_key.is_empty() {
             continue;
         }
+
         let mode = recommend_hook_mode(&target.agent_key);
-        crate::hooks::install_agent_hook_with_mode(&target.agent_key, true, mode);
+
+        if allow_rule_steering {
+            crate::hooks::install_agent_hook_with_mode(&target.agent_key, true, mode);
+        } else {
+            crate::hooks::install_agent_runtime_hook_with_mode(&target.agent_key, true, mode);
+        }
     }
 
     terminal_ui::print_step_header(5, 13, "API Proxy (optional)");

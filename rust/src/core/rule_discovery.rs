@@ -54,7 +54,8 @@ pub(crate) fn rules_suffix_for_read(
     project_root: &str,
     client_id: &str,
 ) -> String {
-    if client_natively_injects_rules(client_id) {
+    let cfg = crate::core::config::Config::load();
+    if cfg.declines_rule_steering() || client_natively_injects_rules(client_id) {
         return String::new();
     }
 
@@ -354,6 +355,67 @@ fn blake3_short(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_auto_inject_false_suppresses_ctx_read_rule_discovery() {
+        let _guard = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+        let project = tmp.path().join("project");
+        let source_dir = project.join("src");
+        let file = source_dir.join("main.rs");
+
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        std::fs::write(
+            project.join("AGENTS.md"),
+            "# Project rules\nAlways write regression tests.\n",
+        )
+        .unwrap();
+
+        let _config_guard = crate::setup::EnvVarGuard::set(
+            "LEAN_CTX_CONFIG_DIR",
+            config_dir.to_string_lossy().as_ref(),
+        );
+        let _injection_guard = crate::setup::EnvVarGuard::set("LEAN_CTX_RULES_INJECTION", "shared");
+
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = true\n",
+        )
+        .unwrap();
+
+        reset_injection_cache();
+        let enabled = rules_suffix_for_read(
+            file.to_string_lossy().as_ref(),
+            project.to_string_lossy().as_ref(),
+            "opencode",
+        );
+
+        assert!(
+            enabled.contains("Always write regression tests."),
+            "test precondition failed: enabled rule discovery produced {enabled:?}"
+        );
+
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[setup]\nauto_inject_rules = false\n",
+        )
+        .unwrap();
+
+        reset_injection_cache();
+        let disabled = rules_suffix_for_read(
+            file.to_string_lossy().as_ref(),
+            project.to_string_lossy().as_ref(),
+            "opencode",
+        );
+
+        assert!(
+            disabled.is_empty(),
+            "explicit auto_inject_rules=false must suppress ctx_read rule discovery, got: {disabled:?}"
+        );
+    }
 
     #[test]
     fn glob_matches_extension() {

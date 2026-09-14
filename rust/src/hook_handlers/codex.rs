@@ -345,6 +345,14 @@ pub fn handle_codex_session_start() {
     if is_quiet() {
         return;
     }
+
+    // Rule steering delivered through SessionStart is the same policy surface
+    // as MCP initialize instructions and rule files. An explicit steering
+    // opt-out must therefore silence this channel as well.
+    if crate::core::config::Config::load().declines_rule_steering() {
+        return;
+    }
+
     // Dedicated rules-injection mode (#343): the `hook observe` SessionStart hook
     // injects the full rules summary as additionalContext, so stay silent here to
     // avoid double-injecting on Codex (which fires both hooks on SessionStart).

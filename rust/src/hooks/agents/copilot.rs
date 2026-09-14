@@ -5,6 +5,10 @@ use super::super::{
     to_bash_compatible_path, write_file,
 };
 
+pub(crate) fn install_copilot_runtime_hook(global: bool) {
+    install_copilot_pretooluse_hook(global);
+}
+
 pub(crate) fn install_copilot_hook(global: bool) {
     let binary = resolve_binary_path();
     // #281: honor `[setup] auto_update_mcp = false`. The PreToolUse hook is the
