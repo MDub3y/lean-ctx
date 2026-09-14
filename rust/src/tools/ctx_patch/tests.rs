@@ -234,6 +234,94 @@ fn batch_atomic_applies_all_valid_edits_bottom_up() {
     assert_eq!(std::fs::read_to_string(f.path()).unwrap(), "A\n3\n4\nE\n");
 }
 
+/// #1767: a batch receipt stated only a total, so a caller could not tell
+/// which ops landed where without reading the evidence diff — and the diff is
+/// the first thing the turn budget (4096 tokens by default) removes. The
+/// ledger names every op, in the caller's order, ahead of the diff.
+#[test]
+fn batch_receipt_accounts_for_every_op_ahead_of_the_evidence() {
+    let content = (1..=10)
+        .map(|i| format!("b{i} original\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let f = make_temp(&content);
+
+    let ops: Vec<AnchorOp> = (1..=10)
+        .map(|i| AnchorOp::SetLine {
+            line: i,
+            hash: line_hash(&format!("b{i} original")),
+            new_text: format!("b{i} rewritten"),
+        })
+        .collect();
+
+    let mut p = params(f.path(), ops);
+    p.evidence = true;
+    let (text, _) = run_io(&p, "");
+
+    assert!(text.contains("10 anchored edits"), "{text}");
+    assert!(
+        text.contains("ops: 10/10 applied"),
+        "the count must be stated: {text}"
+    );
+    for i in 1..=10 {
+        assert!(
+            text.contains(&format!("{i}. set_line {i} → 1 line")),
+            "op {i} must have its own line: {text}"
+        );
+    }
+
+    // The ordering is the point: the ledger has to survive a cut that drops
+    // the diff, so it must come first.
+    let ledger_at = text.find("ops: 10/10").expect("ledger present");
+    let evidence_at = text.find("evidence (diff").expect("evidence present");
+    assert!(
+        ledger_at < evidence_at,
+        "the ledger must precede the droppable evidence diff:\n{text}"
+    );
+
+    // A prefix-truncated receipt still answers "what happened".
+    let prefix: String = text.chars().take(evidence_at).collect();
+    assert!(prefix.contains("ops: 10/10 applied"));
+    assert!(prefix.contains("10. set_line 10 → 1 line"));
+}
+
+/// The ledger reports each op kind with the span it touched, and an empty
+/// `new_text` (the delete convention) contributes zero lines — not one.
+#[test]
+fn op_ledger_reports_kind_span_and_produced_lines() {
+    let f = make_temp("1\n2\n3\n4\n5\n6\n");
+    let mut p = params(
+        f.path(),
+        vec![
+            AnchorOp::ReplaceLines {
+                start_line: 1,
+                start_hash: line_hash("1"),
+                end_line: 2,
+                end_hash: line_hash("2"),
+                new_text: "A\nB".to_string(),
+            },
+            AnchorOp::Delete {
+                start_line: 4,
+                start_hash: line_hash("4"),
+                end_line: 5,
+                end_hash: line_hash("5"),
+            },
+            AnchorOp::InsertAfter {
+                line: 6,
+                hash: Some(line_hash("6")),
+                new_text: "tail".to_string(),
+            },
+        ],
+    );
+    p.evidence = false;
+    let (text, _) = run_io(&p, "");
+
+    assert!(text.contains("ops: 3/3 applied"), "{text}");
+    assert!(text.contains("1. replace_lines 1-2 → 2 lines"), "{text}");
+    assert!(text.contains("2. delete 4-5 → 0 lines"), "{text}");
+    assert!(text.contains("3. insert_after 6 → 1 line"), "{text}");
+}
+
 #[test]
 fn batch_application_is_byte_deterministic() {
     // Determinism (#498): the same batch on byte-identical inputs must produce a
