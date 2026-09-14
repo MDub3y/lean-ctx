@@ -124,6 +124,7 @@ pub(super) fn apply_line_window(
         && matches!(
             mode.parse::<crate::tools::ctx_read::ReadMode>(),
             Ok(crate::tools::ctx_read::ReadMode::Lines(_)
+                | crate::tools::ctx_read::ReadMode::LinesTail(_)
                 | crate::tools::ctx_read::ReadMode::Anchored(Some(_)))
         );
     if preserve_explicit_window {

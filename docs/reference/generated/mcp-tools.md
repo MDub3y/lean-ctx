@@ -403,7 +403,7 @@ Parameters: `format`, `kind`, `match`, `path`*
 
 WORKFLOW: call at session START before ctx_compose/ctx_read.
 ANTIPATTERN: NOT for source code — structure only. Use ctx_compose for code understanding.
-Project map — task='your goal' scopes files by relevance (PageRank on symbol graph).
+Project map — task='your goal' scopes files by relevance (PageRank on symbol graph) and appends a task briefing plus up to 5 task-relevant knowledge facts. With enable_wakeup_ctx (default on) a WAKE-UP BRIEFING follows: last session task, recent decisions, reminders, active peer agents on this project. behavior_nudges="off" drops the OUTPUT-HINT line.
 High-level structure only, no source body. ~10x cheaper than ctx_compose.
 
 Parameters: `path`, `task`

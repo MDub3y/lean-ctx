@@ -37,6 +37,7 @@ import {
   writeMcpSchemaCache,
 } from "./mcp-cache.js";
 import { loadPiConfig, resolvePiShellPath, resolveSuppressedBuiltins } from "./config.js";
+import { classifySearchExit, sanitizeExtraEnv } from "./exec-result.js";
 import { withFooter } from "./footer.js";
 
 const BRIDGE_STARTUP_TIMEOUT_MS = 10_000;
@@ -329,24 +330,51 @@ export default async function (pi: ExtensionAPI) {
   }) as unknown as ExtensionAPI["registerTool"];
 
   const shellPath = resolvePiShellPath();
-  const baseBashTool = createBashToolDefinition(process.cwd(), {
-    shellPath,
-    spawnHook: ({ command, cwd, env }) => {
+  const leanCtxSpawnHook =
+    (extra: Record<string, string>) =>
+    ({ command, cwd, env }: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => {
       const bin = resolveBinary();
       return {
         command: `${shellQuote(bin)} -c ${shellQuote(command)}`,
         cwd,
-        env: leanCtxEnv(env),
+        // Caller-supplied `env` (#1761) sits above the inherited environment
+        // and below the flags lean-ctx must always see; `lean-ctx -c` passes
+        // its environment through to the command, so this is the same
+        // channel the MCP `env` parameter uses.
+        env: leanCtxEnv({ ...env, ...extra }),
       };
-    },
+    };
+  const baseBashTool = createBashToolDefinition(process.cwd(), {
+    shellPath,
+    spawnHook: leanCtxSpawnHook({}),
   });
 
   const rawBash = createBashToolDefinition(process.cwd(), { shellPath });
+
+  // #1761: the CLI rejects inline overrides like `GIT_EDITOR=true git …` and
+  // recommends `ctx_shell(command=…, env={…})`. The spawn hook of a tool
+  // definition is fixed per definition and calls may interleave, so a call
+  // that carries `env` gets its own definition instead of a shared mutable slot.
+  const bashToolWithEnv = (extra: Record<string, string>, raw: boolean) =>
+    raw
+      ? createBashToolDefinition(process.cwd(), {
+          shellPath,
+          spawnHook: ({ command, cwd, env }) => ({ command, cwd, env: { ...env, ...extra } }),
+        })
+      : createBashToolDefinition(process.cwd(), { shellPath, spawnHook: leanCtxSpawnHook(extra) });
 
   const bashSchemaWithRaw = Type.Object({
     command: Type.String({ description: "Bash command to execute" }),
     timeout: Type.Optional(Type.Number({ description: "Timeout in seconds to prevent hanging commands" })),
     raw: Type.Optional(Type.Boolean({ description: "Skip compression, return full uncompressed output" })),
+    env: Type.Optional(
+      Type.Record(Type.String(), Type.String(), {
+        description:
+          "Extra environment variables for the command, e.g. {\"GIT_EDITOR\": \"true\"}. "
+          + "Use this instead of inline VAR=value prefixes, which the shell policy rejects "
+          + "for binary-redirecting variables. Protected keys (PATH, LD_*, LEAN_CTX_*, …) are ignored.",
+      }),
+    ),
   });
 
   // ── ctx_shell (replaces bash) ─────────────────────────────────────────
@@ -393,17 +421,27 @@ export default async function (pi: ExtensionAPI) {
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const isRaw = !!params.raw;
       const toolParams = { command: params.command, timeout: params.timeout };
-      const tool = isRaw ? rawBash : baseBashTool;
+      const extraEnv = sanitizeExtraEnv(params.env);
+      const hasExtraEnv = Object.keys(extraEnv.accepted).length > 0;
+      const tool = hasExtraEnv
+        ? bashToolWithEnv(extraEnv.accepted, isRaw)
+        : isRaw
+          ? rawBash
+          : baseBashTool;
+      const ignoredNote =
+        extraEnv.rejected.length > 0
+          ? `\n[ctx_shell: env keys ignored (protected): ${extraEnv.rejected.join(", ")}]`
+          : "";
       try {
         const result = await tool.execute(toolCallId, toolParams, signal, onUpdate, ctx);
         const text = result.content?.[0]?.type === "text" ? result.content[0].text : "";
         if (isRaw) {
-          return { ...result, content: [{ type: "text", text }], details: { raw: true } };
+          return { ...result, content: [{ type: "text", text: text + ignoredNote }], details: { raw: true } };
         }
         const decorated = withFooter(text, { always: true });
         return {
           ...result,
-          content: [{ type: "text", text: decorated.text }],
+          content: [{ type: "text", text: decorated.text + ignoredNote }],
           details: { ...(result.details ?? {}), compression: decorated.stats },
         };
       } catch (error) {
@@ -634,9 +672,24 @@ export default async function (pi: ExtensionAPI) {
         : (context.lastComponent ?? new Text("", 0, 0));
     },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      if (signal?.aborted) {
+        throw new Error("lean-ctx find interrupted by host.");
+      }
       const requestedPath = normalizePathArg(params.path);
       const absolutePath = resolve(ctx.cwd, requestedPath);
-      const output = await execLeanCtx(pi, ["find", params.pattern, absolutePath], { signal });
+      // #1762: `lean-ctx find` exits 1 with empty output when nothing matched
+      // (the grep convention). Routing that through `execLeanCtx` turned a
+      // normal empty result into "lean-ctx failed: find …".
+      const bin = resolveBinary();
+      const result = await pi.exec(bin, ["find", params.pattern, absolutePath], { signal });
+      if (signal?.aborted || result.killed) {
+        throw new Error("lean-ctx find interrupted by host.");
+      }
+      const exit = classifySearchExit(result, `lean-ctx failed: find ${params.pattern}`);
+      if (exit.kind === "error") {
+        throw new Error(exit.message);
+      }
+      const output = exit.kind === "empty" ? "(no matches)" : exit.stdout;
       const decorated = withFooter(output, { limit: params.limit, always: true });
       return {
         content: [{ type: "text", text: decorated.text }],
@@ -677,17 +730,14 @@ export default async function (pi: ExtensionAPI) {
       if (signal?.aborted || result.killed) {
         throw new Error("lean-ctx grep interrupted by host.");
       }
-      if (result.code >= 2) {
-        const msg = (result.stderr || result.stdout || `lean-ctx grep failed: ${params.pattern}`).trim();
-        throw new Error(msg);
-      }
-      // #1499: exit code 1 with non-empty stderr means a real failure (e.g.
-      // "rg not recognized") — not a clean "no matches" from ripgrep.
-      if (result.code === 1 && result.stderr && result.stderr.trim().length > 0) {
-        throw new Error(result.stderr.trim());
+      // #1499: exit 1 with non-empty stderr is a real failure (e.g. "rg not
+      // recognized"), exit 1 without is a clean "no matches" from ripgrep.
+      const exit = classifySearchExit(result, `lean-ctx grep failed: ${params.pattern}`);
+      if (exit.kind === "error") {
+        throw new Error(exit.message);
       }
       const MAX_OUTPUT_BYTES = 512 * 1024;
-      let output = result.code === 1 ? "(no matches)" : result.stdout;
+      let output = exit.kind === "empty" ? "(no matches)" : exit.stdout;
       if (output.length > MAX_OUTPUT_BYTES) {
         output = output.slice(0, MAX_OUTPUT_BYTES) + "\n\n[Output truncated: exceeded 512 KB byte limit]";
       }

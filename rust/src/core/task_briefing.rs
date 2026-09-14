@@ -112,6 +112,17 @@ fn build_context_hints(
 }
 
 pub fn format_briefing(briefing: &TaskBriefing) -> String {
+    format_briefing_with(briefing, true)
+}
+
+/// Render a briefing, optionally without its `OUTPUT-HINT:` line (#1763).
+///
+/// The hint tells the assistant how to *format its answer*. That is a
+/// behaviour nudge, not retrieval output, so callers that surface a briefing
+/// inside a tool result gate it on the same `behavior_nudges` config key the
+/// nudge system honours — `off` must silence every answer-shaping directive,
+/// not just the ones emitted post-dispatch.
+pub fn format_briefing_with(briefing: &TaskBriefing, include_output_hint: bool) -> String {
     let mut parts = Vec::new();
 
     parts.push(format!(
@@ -120,7 +131,9 @@ pub fn format_briefing(briefing: &TaskBriefing) -> String {
         briefing.completeness_signal.as_str(),
     ));
 
-    parts.push(briefing.output_instruction.to_string());
+    if include_output_hint {
+        parts.push(briefing.output_instruction.to_string());
+    }
 
     if !briefing.context_hints.is_empty() {
         for hint in &briefing.context_hints {
@@ -198,6 +211,30 @@ pub mod tests {
         assert!(formatted.contains("[TASK:"));
         assert!(formatted.contains("OUTPUT-HINT:"));
         assert!(formatted.contains("SCOPE:"));
+    }
+
+    #[test]
+    fn format_briefing_without_output_hint_keeps_classification_and_hints() {
+        // #1763: with nudges off the answer-shaping directive is dropped, but
+        // the task classification and the context hints still render.
+        let files = vec![("src/core/entropy.rs".to_string(), 120)];
+        let briefing = build_briefing("how does the entropy scorer work?", &files);
+        let quiet = format_briefing_with(&briefing, false);
+        assert!(quiet.contains("[TASK:"));
+        assert!(quiet.contains("SCOPE:"));
+        assert!(!quiet.contains("OUTPUT-HINT:"), "{quiet}");
+        assert!(
+            !briefing.context_hints.is_empty(),
+            "explore tasks carry hints"
+        );
+        for hint in &briefing.context_hints {
+            assert!(quiet.contains(hint), "hint '{hint}' must survive");
+        }
+        // The default rendering is unchanged.
+        assert_eq!(
+            format_briefing(&briefing),
+            format_briefing_with(&briefing, true)
+        );
     }
 
     #[test]

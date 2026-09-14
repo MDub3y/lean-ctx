@@ -578,6 +578,9 @@ pub struct Config {
     /// In-band behavior hints (heavy full/raw reads, search→read→search
     /// chains): "auto" (default, one hint per pattern per session) or "off".
     /// Detections are always counted for `tools health`, hints or not.
+    /// "off" also drops the OUTPUT-HINT line from a task-filtered
+    /// `ctx_overview`: that line shapes the assistant's answer rather than
+    /// reporting a retrieval result, so it belongs to the same switch (#1763).
     #[serde(default = "serde_defaults::default_behavior_nudges")]
     pub behavior_nudges: String,
     /// Maximum fresh tokens per single tool response (turn budget).

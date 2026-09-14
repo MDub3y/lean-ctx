@@ -145,8 +145,15 @@ pub fn handle(
                 })
                 .collect();
             let briefing = crate::core::task_briefing::build_briefing(task_desc, &file_context);
+            // #1763: the OUTPUT-HINT line shapes the assistant's answer. It is
+            // a behaviour nudge riding on a retrieval result, so it obeys the
+            // same `behavior_nudges = "off"` switch as every other nudge.
+            let include_output_hint = crate::core::config::Config::load().behavior_nudges != "off";
             output.push(String::new());
-            output.push(crate::core::task_briefing::format_briefing(&briefing));
+            output.push(crate::core::task_briefing::format_briefing_with(
+                &briefing,
+                include_output_hint,
+            ));
         }
     } else {
         // No task context: show project structure overview
@@ -224,7 +231,9 @@ pub fn handle(
 
     let cfg = crate::core::config::Config::load();
     if cfg.enable_wakeup_ctx {
-        let wakeup = build_wakeup_briefing(&project_root, task);
+        // #1763: with a task, the task-relevant facts were just rendered above;
+        // the generic salience block would repeat them and add unrelated ones.
+        let wakeup = build_wakeup_briefing_with(&project_root, task, task.is_none());
         if !wakeup.is_empty() {
             output.push(String::new());
             output.push(wakeup);
@@ -363,9 +372,27 @@ fn import_hotspots_from_edges(gp: &GraphProvider, limit: usize) -> Vec<(String, 
 }
 
 pub fn build_wakeup_briefing(project_root: &str, task: Option<&str>) -> String {
+    build_wakeup_briefing_with(project_root, task, true)
+}
+
+/// Build the wake-up briefing, optionally without the salience-ranked project
+/// facts block (#1763).
+///
+/// A task-filtered `ctx_overview` already lists the facts recalled *for that
+/// task*; repeating the generic top-20 block afterwards showed the same facts
+/// twice and padded the result with memories unrelated to the request. The
+/// caller that has just rendered a task recall passes `false`; every other
+/// caller (footprint measurement, doctor, task-less overview) keeps the block.
+pub fn build_wakeup_briefing_with(
+    project_root: &str,
+    task: Option<&str>,
+    include_generic_facts: bool,
+) -> String {
     let mut parts = Vec::new();
 
-    if let Some(knowledge) = crate::core::knowledge::ProjectKnowledge::load(project_root) {
+    if include_generic_facts
+        && let Some(knowledge) = crate::core::knowledge::ProjectKnowledge::load(project_root)
+    {
         let facts_line = knowledge.format_wakeup();
         if !facts_line.is_empty() {
             parts.push(facts_line);
@@ -696,6 +723,48 @@ mod tests {
             out.contains("1 call edges"),
             "overview header must show persisted call edges, got:\n{out}"
         );
+
+        crate::test_env::remove_var("LEAN_CTX_DATA_DIR");
+    }
+
+    /// #1763: a task-filtered overview already lists the facts recalled for
+    /// the task, so the wake-up briefing must not append the generic
+    /// salience-ranked block on top — that repeated the same facts and padded
+    /// the result with memories unrelated to the request.
+    #[test]
+    fn wakeup_briefing_skips_generic_facts_after_a_task_recall() {
+        let _lock = crate::core::data_dir::test_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("data dir");
+        crate::test_env::set_var("LEAN_CTX_DATA_DIR", data.path().to_str().unwrap());
+        let root = tmp.path().to_str().unwrap();
+
+        let mut knowledge = crate::core::knowledge::ProjectKnowledge::new(root);
+        knowledge.remember(
+            "architecture",
+            "retry-handling",
+            "request retries live in net/retry.rs behind RetryPolicy",
+            "test-session",
+            0.95,
+            &crate::core::memory_policy::MemoryPolicy::default(),
+        );
+        knowledge.save().expect("persist knowledge");
+
+        // `format_wakeup` fences the block as `LCTX_PROJECT_FACTS_WAKEUP_<hash>`.
+        const FACTS_MARKER: &str = "PROJECT_FACTS_WAKEUP";
+
+        let with_task = build_wakeup_briefing_with(root, Some("locate retry handling"), false);
+        assert!(
+            !with_task.contains(FACTS_MARKER),
+            "generic facts must not follow a task recall:\n{with_task}"
+        );
+
+        let without_task = build_wakeup_briefing_with(root, None, true);
+        assert!(
+            without_task.contains(FACTS_MARKER),
+            "a task-less wake-up keeps the facts block:\n{without_task}"
+        );
+        assert!(without_task.contains("net/retry.rs"));
 
         crate::test_env::remove_var("LEAN_CTX_DATA_DIR");
     }

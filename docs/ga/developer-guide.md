@@ -79,7 +79,9 @@ client that keeps its initial MCP tool list small, not a replacement for normal
 MCP calls.
 
 `ctx_read` supports ten working modes: `auto`, `full`, `map`, `signatures`,
-`diff`, `aggressive`, `entropy`, `task`, `reference`, and `lines:N-M`. Choose
+`diff`, `aggressive`, `entropy`, `task`, `reference`, and `lines:N-M`. The line
+window also accepts `lines:-N` for the last N lines and a comma multi-select
+such as `lines:5,10-20`. Choose
 `signatures` for an API surface, `map` for structure, `diff` after an edit, and
 `full` or `anchored` when the client will make an edit. See [context engineering](../reference/07-context-engineering.md)
 for selection guidance.

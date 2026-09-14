@@ -397,6 +397,13 @@ postimage: bytes={}, mtime_ms={post_mtime_ms}, md5={post_md5}",
     if let Some(bp) = backup_path {
         out.push_str(&format!("\nbackup: {bp}"));
     }
+    // A single op needs no ledger: the header above already names the one edit,
+    // and this is the overwhelmingly common receipt — spending tokens to repeat
+    // it there would work against the tool's own purpose.
+    if params.ops.len() > 1 {
+        out.push('\n');
+        out.push_str(&render_op_ledger(&params.ops));
+    }
     if params.evidence {
         let diff = build_diff_evidence(old_content, new_content, &short, params.diff_max_lines);
         out.push_str("\n\nevidence (diff, redacted, bounded):\n```diff\n");
@@ -413,6 +420,67 @@ postimage: bytes={}, mtime_ms={post_mtime_ms}, md5={post_md5}",
         }
     }
     out
+}
+
+/// Per-op ledger for a batch receipt (#1767): a count line plus one line per
+/// op, in the order the caller sent them.
+///
+/// The receipt used to state only a total — `10 anchored edits` — so a caller
+/// who needed to know *which* ops landed where had to read the evidence diff.
+/// That diff is the bounded, droppable part of the receipt and the first thing
+/// a turn-budget truncation removes (the default budget is 4096 tokens and a
+/// ten-op diff overruns it), which left the caller running `grep` against the
+/// file to find out what had happened. The ledger costs a few tokens per op,
+/// sits ahead of the diff, and therefore survives any cut that keeps the
+/// header at all.
+///
+/// `applied` is always `n/n`: a batch is atomic, so a receipt exists only when
+/// every op landed. Stating it is the point — the reader should not have to
+/// infer completeness from the absence of an error.
+fn render_op_ledger(ops: &[AnchorOp]) -> String {
+    let mut out = format!("ops: {n}/{n} applied", n = ops.len());
+    for (index, op) in ops.iter().enumerate() {
+        let (kind, span, produced) = match op {
+            AnchorOp::SetLine { line, new_text, .. } => {
+                ("set_line", line.to_string(), produced_lines(new_text))
+            }
+            AnchorOp::ReplaceLines {
+                start_line,
+                end_line,
+                new_text,
+                ..
+            } => (
+                "replace_lines",
+                format!("{start_line}-{end_line}"),
+                produced_lines(new_text),
+            ),
+            AnchorOp::InsertAfter { line, new_text, .. } => {
+                ("insert_after", line.to_string(), produced_lines(new_text))
+            }
+            AnchorOp::Delete {
+                start_line,
+                end_line,
+                ..
+            } => ("delete", format!("{start_line}-{end_line}"), 0),
+            AnchorOp::Create { new_text } => ("create", "-".to_string(), produced_lines(new_text)),
+        };
+        let line_word = if produced == 1 { "line" } else { "lines" };
+        out.push_str(&format!(
+            "\n  {}. {kind} {span} → {produced} {line_word}",
+            index + 1
+        ));
+    }
+    out
+}
+
+/// Lines a `new_text` payload contributes. Empty text deletes (the readseek
+/// convention the op variants document), which is zero lines — not one.
+fn produced_lines(new_text: &str) -> usize {
+    if new_text.is_empty() {
+        0
+    } else {
+        new_text.lines().count()
+    }
 }
 
 /// Counts unmatched `{` vs `}` in the full post-edit content. Returns the

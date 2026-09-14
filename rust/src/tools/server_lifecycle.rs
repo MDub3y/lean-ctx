@@ -88,14 +88,89 @@ impl LeanCtxServer {
             return Ok(());
         }
 
-        let project_root = self
-            .startup_project_root
-            .as_deref()
-            .or(self.startup_shell_cwd.as_deref())
-            .unwrap_or(".");
-        let agent_id = crate::core::agents::AgentRegistry::register_mcp_process(project_root)?;
+        let project_root = self.presence_root();
+        let requested_role = self.presence_role.read().await.clone();
+        let registration = match requested_role.as_deref() {
+            // #1766: once `initialize` has resolved the session's role, the
+            // retry must register with it — falling back to the
+            // `context-engine` placeholder rewrote a `reviewer` presence and
+            // exempted the session from worker accounting.
+            Some(role) => {
+                crate::core::agents::AgentRegistry::register_mcp_process_as(project_root, role)
+            }
+            None => crate::core::agents::AgentRegistry::register_mcp_process(project_root),
+        };
+        let agent_id = match registration {
+            Ok(agent_id) => {
+                self.presence_read_only
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                agent_id
+            }
+            // #1765: over the mutating cap the session is still admitted —
+            // read-only — instead of losing every tool, reads included, until
+            // an unrelated session's lease lapses.
+            Err(error)
+                if crate::core::agents::AgentRegistry::is_mutating_capacity_error(&error) =>
+            {
+                let role = requested_role.as_deref().unwrap_or("context-engine");
+                tracing::warn!("lean-ctx: {error}; admitting {role} session read-only");
+                let agent_id = crate::core::agents::AgentRegistry::admit_read_only_presence(
+                    project_root,
+                    role,
+                )?;
+                self.presence_read_only
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                agent_id
+            }
+            Err(error) => return Err(error),
+        };
         *self.presence_agent_id.write().await = Some(agent_id);
         Ok(())
+    }
+
+    /// #1765: a read-only-admitted session retries its real role before a
+    /// mutating tool runs. `Ok(())` when the slot was granted — or the session
+    /// was never degraded; `Err` carries the caller-facing refusal, which names
+    /// the tools that keep working and when to retry.
+    pub(crate) async fn try_upgrade_presence(&self, tool: &str) -> Result<(), String> {
+        if !self
+            .presence_read_only
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        let Some(role) = self.presence_role.read().await.clone() else {
+            return Ok(());
+        };
+        match crate::core::agents::AgentRegistry::register_mcp_process_as(
+            self.presence_root(),
+            &role,
+        ) {
+            Ok(agent_id) => {
+                *self.presence_agent_id.write().await = Some(agent_id);
+                self.presence_read_only
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+            Err(error)
+                if crate::core::agents::AgentRegistry::is_mutating_capacity_error(&error) =>
+            {
+                Err(format!(
+                    "[CAPACITY] '{tool}' needs a mutating worker slot and none is free: {error}. \
+                     This session stays admitted read-only — {} keep working; retry '{tool}' \
+                     once a slot frees.",
+                    crate::core::editor_registry::plan_mode::plan_mode_tools().join(", ")
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn presence_root(&self) -> &str {
+        self.startup_project_root
+            .as_deref()
+            .or(self.startup_shell_cwd.as_deref())
+            .unwrap_or(".")
     }
 
     pub(crate) fn new_with_startup(
@@ -224,6 +299,8 @@ impl LeanCtxServer {
             agent_id: Arc::new(RwLock::new(None)),
             task_envelope: Arc::new(RwLock::new(None)),
             presence_agent_id: Arc::new(RwLock::new(presence_agent_id)),
+            presence_role: Arc::new(RwLock::new(None)),
+            presence_read_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             client_name: Arc::new(RwLock::new(String::new())),
             autonomy: Arc::new(crate::core::autonomy::AutonomyState::new()),
             loop_detector: Arc::new(RwLock::new(

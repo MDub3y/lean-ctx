@@ -5,6 +5,90 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — `ctx_patch` batch receipt accounts for every op (#1767)
+
+- A batch receipt stated only a total (`10 anchored edits`), so a caller could
+  not tell which ops landed where without reading the evidence diff — and that
+  diff is the first thing the turn budget (4096 tokens by default) removes,
+  which left callers running `grep` against the file to find out what had
+  happened. The receipt now carries `ops: N/N applied` plus one line per op
+  (kind, span, lines produced) in the caller's order, ahead of the diff, so the
+  accounting survives any truncation that keeps the header at all.
+
+### Fixed — the `ctx_shell` redirect refusal names the rule that fired (#1768)
+
+- The refusal justified itself with "MCP protocol corruption on large
+  payloads" while the guard allows a megabyte into `/tmp` and blocks two bytes
+  into a project file — a size rationale for a path-scoped rule. It now names
+  the redirect target that tripped it and states the rule (the destination
+  decides), the real reason (ctx_shell compresses what it returns, so a
+  redirect into a file you keep can persist compression markers instead of the
+  command's bytes), and the reachable alternative.
+
+### Fixed — `tail -N` hook rewrite and `lines:-N` (#1759)
+
+- `ctx_read` accepts `mode="lines:-N"` — the last N lines — so the Bash-hook
+  rewrite of `tail -N <file>` returns those lines instead of an "invalid read
+  mode" error. `-N` parts also work inside a comma multi-select
+  (`lines:1-3,-2`). The tail form is a precise pinned read like `lines:N-M`:
+  never raw-capped, never silently widened to `full`.
+- `tail -n +N <file>` now rewrites to `lines:N` (from line N to the end).
+  `"+N".parse::<usize>()` is `Ok(N)`, so it used to become `lines:-N` — the
+  *last* N lines. `head -n -N` / `head -n +N` are left to native `head`.
+- `tail -f` / `-F` / `--follow` are never rewritten: a static window read
+  cannot stand in for a following tail.
+
+### Fixed — Pi `ctx_shell` honours the `env` the CLI recommends (#1761)
+
+- `ctx_shell` in `pi-lean-ctx` exposes and forwards an `env` parameter. The
+  CLI rejects inline overrides such as `GIT_EDITOR=true git …` and tells the
+  caller to use `env={…}`; the Pi tool neither declared nor forwarded it, so
+  the recommended recovery could not be expressed. Protected keys (`PATH`,
+  `LD_*`, `LEAN_CTX_*`, …) are dropped with the same policy as the MCP
+  `env` parameter, and the dropped keys are named in the result.
+
+### Fixed — Pi `ctx_find` no-match is an empty result, not a failure (#1762)
+
+- `lean-ctx find` exits 1 with empty output when nothing matched (the grep
+  convention). The Pi wrapper turned every nonzero exit into
+  `lean-ctx failed: find …`; it now reports `(no matches)` and keeps exit 1
+  *with* stderr a real failure, sharing the classification `ctx_grep` has
+  used since #1499.
+
+### Fixed — task-filtered `ctx_overview` no longer pads with unrelated memories (#1763)
+
+- With `task=`, the wake-up briefing no longer appends the generic
+  salience-ranked facts block: the task-relevant facts were already listed
+  just above, so the block repeated them and added memories unrelated to
+  the request.
+- The `OUTPUT-HINT` line of the task briefing obeys `behavior_nudges =
+  "off"` like every other answer-shaping nudge.
+- The tool description now says what `task=` appends (task briefing,
+  task-relevant facts, wake-up briefing under `enable_wakeup_ctx`) instead
+  of promising "structure only".
+
+### Fixed — over-cap sessions are admitted read-only (#1765)
+
+- A session that starts while the machine-wide mutating-agent cap is full
+  is admitted read-only instead of losing every tool — reads included —
+  until an unrelated session's lease lapses. The plan-mode (read-only) tool
+  set works immediately; the first mutating call retries the real role and,
+  if the cap is still full, refuses with the tools that keep working and
+  when to retry.
+- The construction-time `context-engine` placeholder never counted against
+  a cap but was refused by one; it is now exempt from the checks as well.
+  In exchange the `initialize` upgrade from the placeholder to the real
+  role — previously never checked — now passes the caps like a fresh
+  registration, so the mutating cap holds by design rather than by accident.
+
+### Fixed — presence retry no longer rewrites a session's role (#1766)
+
+- The fail-closed presence retry re-registers with the role resolved at
+  `initialize` instead of the `context-engine` placeholder, and the
+  placeholder never overwrites an explicit role on the same process. A
+  `reviewer` (or `coder`) session keeps its role and its place in
+  worker-capacity accounting after its first tool call.
+
 ### Added — cache-safe conversation management
 
 - Errored tool inputs are deterministically purged only after they enter the

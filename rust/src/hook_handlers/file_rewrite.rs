@@ -356,8 +356,14 @@ pub(super) fn rewrite_file_read_command(cmd: &str, binary: &str) -> Option<Strin
             }
             let qp = shell_quote(path);
             match n {
-                Some(lines) => Some(format!("{binary} read {qp} -m lines:1-{lines}")),
                 None => Some(format!("{binary} read {qp} -m lines:1-10")),
+                Some(LineCount::Plain(lines)) => {
+                    Some(format!("{binary} read {qp} -m lines:1-{lines}"))
+                }
+                // `head -n -N` (everything but the last N) and `+N` have no
+                // `lines:` form; leave them to native head rather than rewrite
+                // to a window that reads something else.
+                Some(LineCount::Minus(_) | LineCount::Plus(_)) => None,
             }
         }
         "tail" => {
@@ -367,14 +373,28 @@ pub(super) fn rewrite_file_read_command(cmd: &str, binary: &str) -> Option<Strin
             if has_byte_count_flag(&refs) {
                 return None;
             }
+            // `tail -f` / `-F` / `--follow` streams; a static window read can
+            // never stand in for it.
+            if has_follow_flag(&refs) {
+                return None;
+            }
             let (n, path) = parse_head_tail_args(&refs);
             let path = path?;
             if is_outside_project_path(path) {
                 return None;
             }
             let qp = shell_quote(path);
-            let lines = n.unwrap_or(10);
-            Some(format!("{binary} read {qp} -m lines:-{lines}"))
+            match n {
+                // `tail -n +N` is "from line N to EOF" — a bare `lines:N`
+                // (#1759). `"+N".parse::<usize>()` succeeds, so before the sign
+                // was tracked this became `lines:-N`: the LAST N lines, a
+                // silently wrong window once `lines:-N` started to parse.
+                Some(LineCount::Plus(from)) => Some(format!("{binary} read {qp} -m lines:{from}")),
+                Some(LineCount::Plain(lines) | LineCount::Minus(lines)) => {
+                    Some(format!("{binary} read {qp} -m lines:-{lines}"))
+                }
+                None => Some(format!("{binary} read {qp} -m lines:-10")),
+            }
         }
         "Get-Content" | "gc" => rewrite_get_content(&parts, binary),
         _ => None,
@@ -557,21 +577,71 @@ pub(super) fn has_byte_count_flag(args: &[&str]) -> bool {
     })
 }
 
-pub(super) fn parse_head_tail_args<'a>(args: &[&'a str]) -> (Option<usize>, Option<&'a str>) {
-    let mut n: Option<usize> = None;
+/// The line count a `head`/`tail` invocation asked for, with its sign kept:
+/// the same digits mean different windows depending on the sign and the
+/// command (#1759).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LineCount {
+    /// `-N`, `-n N`, `-nN`: the first (head) / last (tail) N lines.
+    Plain(usize),
+    /// `-n -N`: for tail the last N lines (GNU spelling); for head
+    /// "everything but the last N", which has no `lines:` equivalent.
+    Minus(usize),
+    /// `-n +N` / `+N` (tail): from line N to the end of the file.
+    Plus(usize),
+}
+
+/// Parse one count token (`20`, `-20`, `+20`) into a signed [`LineCount`].
+fn parse_line_count(raw: &str) -> Option<LineCount> {
+    let raw = raw.trim();
+    if let Some(from) = raw.strip_prefix('+') {
+        return from.parse().ok().map(LineCount::Plus);
+    }
+    if let Some(last) = raw.strip_prefix('-') {
+        return last.parse().ok().map(LineCount::Minus);
+    }
+    raw.parse().ok().map(LineCount::Plain)
+}
+
+/// True for `tail -f`, `-F`, `--follow[=…]` and a short-flag cluster carrying
+/// `f`/`F` (`-nf`, `-fn 20`): the invocation streams, so it is never a
+/// candidate for a static window read.
+fn has_follow_flag(args: &[&str]) -> bool {
+    args.iter().any(|arg| {
+        if let Some(long) = arg.strip_prefix("--") {
+            return long == "follow" || long.starts_with("follow=");
+        }
+        match arg.strip_prefix('-') {
+            Some(cluster) if !cluster.is_empty() && !cluster.starts_with('-') => {
+                // A numeric count (`-20`) is not a flag cluster.
+                cluster.parse::<usize>().is_err() && cluster.contains(['f', 'F'])
+            }
+            _ => false,
+        }
+    })
+}
+
+pub(super) fn parse_head_tail_args<'a>(args: &[&'a str]) -> (Option<LineCount>, Option<&'a str>) {
+    let mut n: Option<LineCount> = None;
     let mut path: Option<&str> = None;
 
     let mut i = 0;
     while i < args.len() {
         if args[i] == "-n" && i + 1 < args.len() {
-            n = args[i + 1].parse().ok();
+            n = parse_line_count(args[i + 1]);
             i += 2;
         } else if let Some(num) = args[i].strip_prefix("-n") {
-            n = num.parse().ok();
+            n = parse_line_count(num);
+            i += 1;
+        } else if let Some(from) = args[i].strip_prefix('+') {
+            // Legacy `tail +N file` (POSIX obsolescent, still accepted by GNU).
+            if let Ok(from) = from.parse::<usize>() {
+                n = Some(LineCount::Plus(from));
+            }
             i += 1;
         } else if args[i].starts_with('-') && args[i].len() > 1 {
             if let Ok(num) = args[i][1..].parse::<usize>() {
-                n = Some(num);
+                n = Some(LineCount::Plain(num));
             }
             i += 1;
         } else {
