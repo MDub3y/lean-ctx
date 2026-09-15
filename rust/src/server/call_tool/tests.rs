@@ -282,6 +282,7 @@ mod shell_outcome_tests {
             Some(10_000),
             std::time::Duration::from_millis(10),
             None,
+            None,
         );
         let job_id = match detached {
             crate::server::background_shell::ForegroundResult::Detached { job_id } => job_id,
@@ -345,6 +346,7 @@ mod shell_outcome_tests {
             Some(30_000),
             std::time::Duration::from_millis(10),
             None,
+            None,
         );
         let job_id = match detached {
             crate::server::background_shell::ForegroundResult::Detached { job_id } => job_id,
@@ -396,6 +398,7 @@ mod shell_outcome_tests {
             std::collections::HashMap::default(),
             Some(10_000),
             std::time::Duration::from_millis(10),
+            None,
             None,
         );
         let job_id = match detached {
@@ -629,6 +632,7 @@ mod shell_outcome_tests {
             std::collections::HashMap::default(),
             Some(10_000),
             std::time::Duration::from_millis(10),
+            None,
             None,
         );
         let job_id = match detached {

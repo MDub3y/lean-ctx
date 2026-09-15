@@ -693,9 +693,15 @@ impl ServerHandler for LeanCtxServer {
         let loop_detector = self.loop_detector.clone();
         let ct = context.ct.clone();
 
-        match AssertUnwindSafe(self.call_tool_guarded(request))
-            .catch_unwind()
-            .await
+        // #1781: scope the request's cancellation token for the whole dispatch
+        // so a tool that waits on a child process can observe an abandoned call
+        // instead of holding its blocking-pool slot until its own soft cap.
+        match AssertUnwindSafe(
+            crate::server::tool_trait::REQUEST_CT
+                .scope(ct.clone(), self.call_tool_guarded(request)),
+        )
+        .catch_unwind()
+        .await
         {
             Ok(result) => {
                 // #1265: If the client cancelled this request while the tool was

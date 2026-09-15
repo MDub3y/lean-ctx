@@ -267,6 +267,17 @@ pub trait McpTool: Send + Sync {
     }
 }
 
+tokio::task_local! {
+    /// #1781: the cancellation token of the request currently being served,
+    /// scoped by `call_tool` around the whole guarded dispatch.
+    ///
+    /// A task-local rather than a field on the shared server: rmcp spawns one
+    /// task per request and hands each its own `child_token`, so concurrent
+    /// calls would otherwise overwrite one another's token — and cancelling the
+    /// wrong command is worse than not cancelling at all.
+    pub static REQUEST_CT: tokio_util::sync::CancellationToken;
+}
+
 /// Context passed to tool handlers. Contains pre-resolved values that
 /// many tools need, avoiding repeated async lock acquisition inside
 /// handlers. Extended with shared server state for tools that need
@@ -325,6 +336,14 @@ pub struct ToolContext {
     pub bm25_cache: Option<crate::core::bm25_cache::SharedBm25Cache>,
     /// MCP progress notification sender for long-running operations.
     pub progress_sender: Option<crate::server::progress::SharedProgressSender>,
+    /// Cancellation token for this request, when the transport supplies one
+    /// (#1781).
+    ///
+    /// A synchronous tool that waits on a child process cannot observe an
+    /// aborted call without it: the host stops waiting, but the wait loop keeps
+    /// running and holds its thread until its own cap expires. Tools that block
+    /// should consult this and return promptly when it fires.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Default for ToolContext {
@@ -354,6 +373,7 @@ impl Default for ToolContext {
             path_errors: std::collections::HashMap::new(),
             bm25_cache: None,
             progress_sender: None,
+            cancel: None,
         }
     }
 }

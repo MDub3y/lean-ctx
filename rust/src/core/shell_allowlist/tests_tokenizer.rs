@@ -34,6 +34,34 @@ fn tokenize_backslash_escape() {
     assert_eq!(tokens, vec!["echo", "hello world"]);
 }
 
+/// #1781: a double-quoted Windows path kept its spaces but lost every
+/// backslash, so the allowlist was handed
+/// `C:Program FilesDockerDockerDocker Desktop.exe` — a fragment that was never
+/// a command — and asked the user to report it. The command below is the one
+/// from the report, verbatim.
+/// POSIX 2.2.3: inside double quotes `\` is literal unless it precedes
+/// `$`, `` ` ``, `"`, `\` or a newline.
+#[test]
+fn tokenize_double_quoted_windows_path_keeps_backslashes() {
+    let tokens =
+        shell_tokenize(r#"Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe""#);
+    assert_eq!(
+        tokens,
+        vec![
+            "Start-Process",
+            r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+        ]
+    );
+}
+
+/// The escapes POSIX *does* honour inside double quotes must still collapse.
+#[test]
+fn tokenize_double_quoted_honours_posix_escapes() {
+    assert_eq!(shell_tokenize(r#"echo "a\"b""#), vec!["echo", r#"a"b"#]);
+    assert_eq!(shell_tokenize(r#"echo "a\\b""#), vec!["echo", r"a\b"]);
+    assert_eq!(shell_tokenize(r#"echo "a\$b""#), vec!["echo", "a$b"]);
+}
+
 #[test]
 fn tokenize_empty() {
     assert!(shell_tokenize("").is_empty());

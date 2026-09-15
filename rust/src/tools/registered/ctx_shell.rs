@@ -400,6 +400,7 @@ impl McpTool for CtxShellTool {
                     timeout_ms,
                     soft_cap,
                     Some(&on_tick),
+                    ctx.cancel.as_ref(),
                 ) {
                     crate::server::background_shell::ForegroundResult::Finished {
                         output,

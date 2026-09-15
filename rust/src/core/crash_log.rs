@@ -82,6 +82,24 @@ pub fn write_crash_entry(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf
     write_entry_to(&dir, &location, &thread, &panic_payload(info))
 }
 
+/// True when a panic payload describes a peer that closed the pipe.
+///
+/// A host closing stdout/stderr is normal for an MCP server — a restart, an
+/// aborted tool call, an IDE reload — and the resulting write panic is not a
+/// crash worth logging. The wording is platform-specific, which is exactly what
+/// #1781 exposed: the original guard matched only the POSIX phrasing, so every
+/// Windows instance recorded these as crashes (ten-plus entries in one report).
+///
+/// - POSIX: `Broken pipe`
+/// - Windows: `The pipe is being closed. (os error 232)` — `ERROR_NO_DATA`
+/// - Windows: `os error 109` — `ERROR_BROKEN_PIPE`
+pub(crate) fn is_broken_pipe_payload(payload: &str) -> bool {
+    payload.contains("Broken pipe")
+        || payload.contains("The pipe is being closed")
+        || payload.contains("os error 232")
+        || payload.contains("os error 109")
+}
+
 /// Installs the process-wide panic hook: persistent crash log + the friendly
 /// stderr message. Used by the binary entry point (CLI, MCP server, proxy and
 /// daemon all run through it).
@@ -96,18 +114,14 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;
 
-        // #826: stderr BrokenPipe panics are harmless — they happen when
-        // the MCP client (Codex CLI) closes the pipe while tracing/eprintln!
-        // is still writing. Don't log these as crashes.
-        let is_broken_pipe = info
+        // #826/#1781: a peer closing the pipe is normal; don't log it as a crash.
+        let payload = info
             .payload()
             .downcast_ref::<String>()
-            .is_some_and(|m| m.contains("Broken pipe"))
-            || info
-                .payload()
-                .downcast_ref::<&str>()
-                .is_some_and(|m| m.contains("Broken pipe"));
-        if is_broken_pipe {
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if is_broken_pipe_payload(payload) {
             return;
         }
 
@@ -145,6 +159,33 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1781: the guard matched only the POSIX wording, so every Windows
+    /// instance logged a routine pipe close as a crash — ten-plus entries in
+    /// the report that prompted this. The Windows payloads cannot be produced
+    /// on this platform, so the wordings are pinned here instead.
+    #[test]
+    fn broken_pipe_payloads_are_recognised_on_every_platform() {
+        assert!(is_broken_pipe_payload(
+            "failed printing to stderr: Broken pipe (os error 32)"
+        ));
+        assert!(is_broken_pipe_payload(
+            "failed printing to stderr: The pipe is being closed. (os error 232)"
+        ));
+        assert!(is_broken_pipe_payload("write failed: os error 109"));
+    }
+
+    #[test]
+    fn unrelated_panics_are_still_logged_as_crashes() {
+        assert!(!is_broken_pipe_payload(
+            "index out of bounds: the len is 3 but the index is 7"
+        ));
+        assert!(!is_broken_pipe_payload(
+            "called `Option::unwrap()` on a `None` value"
+        ));
+        // A different OS error must not be swallowed just because it is an OS error.
+        assert!(!is_broken_pipe_payload("permission denied (os error 13)"));
+    }
 
     #[test]
     fn entry_contains_thread_location_payload_and_backtrace() {

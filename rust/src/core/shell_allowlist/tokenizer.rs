@@ -14,8 +14,23 @@ pub fn shell_tokenize(input: &str) -> Vec<String> {
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
             '\\' if !in_single => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
+                // #1781: inside double quotes a backslash is literal unless it
+                // precedes `$`, `` ` ``, `"`, `\` or a newline (POSIX 2.2.3).
+                // The old arm consumed it unconditionally, so a quoted Windows
+                // path — `Start-Process "C:\Program Files\Docker\Docker Desktop.exe"`
+                // — tokenized as `C:Program FilesDockerDocker Desktop.exe`, and
+                // the allowlist then refused a fragment that was never a command
+                // and asked the user to report it. Outside quotes the escape
+                // still applies to any character, which `tokenize_backslash_escape`
+                // pins.
+                let escapes_next =
+                    !in_double || matches!(chars.peek(), Some('$' | '`' | '"' | '\\' | '\n'));
+                if escapes_next {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                } else {
+                    current.push('\\');
                 }
             }
             '$' if !in_single && chars.peek() == Some(&'{') => {
