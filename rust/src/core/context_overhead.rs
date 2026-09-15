@@ -318,8 +318,22 @@ pub mod tests {
         assert_eq!(net_of_injection(1234, 3000, 0), (0, 1234));
     }
 
+    /// `PROACTIVE_INJECTED_TOKENS` is a single process-global counter, so the
+    /// two tests below raced under `cargo test`'s parallelism: one reset and
+    /// added while the other reset and read, and the reader observed this
+    /// module's own `17 + 5`. The failure value was literally `22`, which is
+    /// what made the source unambiguous.
+    ///
+    /// A lock scoped to this pair is the right size for the problem —
+    /// `test_env_lock` would serialize them against every env-mutating test in
+    /// the suite to protect one `AtomicUsize`.
+    static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn proactive_injection_counter_accumulates() {
+        let _guard = COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_proactive_injection();
         record_proactive_injection(17);
         record_proactive_injection(5);
@@ -328,6 +342,9 @@ pub mod tests {
 
     #[test]
     fn proactive_injection_counter_starts_at_zero_after_reset() {
+        let _guard = COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_proactive_injection();
         assert_eq!(proactive_injected_tokens(), 0);
     }

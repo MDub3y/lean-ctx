@@ -171,8 +171,33 @@ Content for section {i}."
 
 /// Regression #841 complement: full->full (no mode change) must still serve
 /// the cheap [unchanged] stub -- the fix must not break the happy path.
+///
+/// NOTE: the stub decision runs through `is_cache_entry_stale_verified`, which
+/// with verification on (the default) always re-reads the file and treats *any*
+/// I/O failure as "stale" (`Err(_) => true`). That is the correct product
+/// behaviour -- serving a stub for content it could not verify would be the
+/// worst failure a context layer can have -- but it makes this assertion
+/// sensitive to transient read failures on Windows CI, where the file may still
+/// be locked moments after the write (#841-ci, same class as
+/// `mode_change_clears_full_delivered_flag` above). Sync and retry rather than
+/// skip: the invariant is worth checking on Windows too.
 #[test]
 fn full_reread_still_serves_stub_when_no_mode_change() {
+    for attempt in 0..3 {
+        let result =
+            std::panic::catch_unwind(full_reread_still_serves_stub_when_no_mode_change_inner);
+        if result.is_ok() {
+            return;
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+fn full_reread_still_serves_stub_when_no_mode_change_inner() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stable.rs");
     let p = path.to_string_lossy().to_string();
@@ -191,6 +216,10 @@ fn full_reread_still_serves_stub_when_no_mode_change() {
         ),
     )
     .unwrap();
+    // Best-effort flush before the cache hashes it — on Windows the verification
+    // read can otherwise hit a still-locked file and report "stale" (#841-ci).
+    // PermissionDenied here is expected and ignored.
+    let _ = std::fs::File::open(&path).and_then(|f| f.sync_all());
 
     let mut cache = SessionCache::new();
 
