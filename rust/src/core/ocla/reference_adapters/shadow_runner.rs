@@ -467,16 +467,30 @@ mod tests {
     #[test]
     fn live_shadow_produces_a_valid_observation_pair_without_mutating_response() {
         use crate::core::ocla::reference_adapters::{RtkConfig, RtkShellAdapter};
-        use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = directory.path().join("rtk");
-        std::fs::write(
-            &binary,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'rtk 1.2.3'; exit 0; fi\nprintf '%s\\n' \"$2\"\n",
-        )
-        .expect("write fake RTK");
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake RTK executable");
+        // #1777: create the fake RTK executable *as* an executable and flush it
+        // before the adapter spawns it. The previous write-then-chmod sequence
+        // left a window in which the file existed but was not yet executable,
+        // and in which its bytes had not necessarily reached disk — the spawn
+        // then failed transiently and `rtk_observation.output_ref` stayed None.
+        // Measured at roughly one failure in three runs, including in isolation.
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o755)
+                .open(&binary)
+                .expect("create fake RTK");
+            file.write_all(
+                b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'rtk 1.2.3'; exit 0; fi\nprintf '%s\\n' \"$2\"\n",
+            )
+            .expect("write fake RTK");
+            file.sync_all().expect("flush fake RTK");
+        }
         let hash = super::super::rtk_shell::sha256_file(&binary).expect("hash fake RTK");
         let adapter = RtkShellAdapter::new(
             RtkConfig::new(&binary)

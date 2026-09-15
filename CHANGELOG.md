@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — four test races that made CI red without a product defect
+
+- **`ctx_read` stub re-read (#841-ci).** `full_reread_still_serves_stub_when_no_mode_change`
+  turned `main` red on Windows. The stub decision runs through
+  `is_cache_entry_stale_verified`, which — with verification on, the default —
+  always re-reads the file and treats *any* I/O failure as stale
+  (`Err(_) => true`). That product behaviour is correct: serving an `[unchanged]`
+  stub for content it could not verify would be the worst failure a context
+  layer can have. But on Windows CI the file can still be locked moments after
+  the write, so the verification read fails transiently and the full body is
+  re-delivered. The test now syncs the file and retries, following the same
+  `#841-ci` pattern its neighbour `mode_change_clears_full_delivered_flag`
+  already uses. The production path is unchanged.
+- **Fake RTK spawn window (#1777).** The shadow-runner test wrote its fake `rtk`
+  script and *then* chmod-ed it executable, leaving a window in which the file
+  existed but could not yet be spawned — and in which its bytes had not
+  necessarily reached disk. Measured at roughly one failure in three runs,
+  including in isolation. It is now created with `mode(0o755)` and synced before
+  hashing, so there is no window to lose.
+- **Process-global `current_dir` reads (#1778).** Five test sites read
+  `std::env::current_dir()` to obtain a project root while four other files
+  mutate the process cwd via `set_current_dir`; `test_env_lock` serializes env
+  mutation only, so the readers were unprotected. None of them needed a
+  *particular* directory, so they now use `env!("CARGO_MANIFEST_DIR")` — a
+  compile-time constant no thread can change. No new locking, so no serialization
+  cost.
+- **Shared proactive-injection counter.** `PROACTIVE_INJECTED_TOKENS` is a single
+  process-global `AtomicUsize`, and two tests in `context_overhead` shared it:
+  one reset-and-added while the other reset-and-read. The failure value was
+  literally `22` — this module's own `17 + 5` — which made the source
+  unambiguous. A lock scoped to that pair fixes it; `test_env_lock` would have
+  serialized them against every env-mutating test in the suite to protect one
+  atomic.
+
 ### Fixed — `proxy enable` wires clients on platforms without autostart (#1773)
 
 - `proxy_autostart::install` has backends for macOS (launchd) and Linux

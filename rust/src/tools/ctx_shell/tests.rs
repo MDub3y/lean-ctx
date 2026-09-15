@@ -60,7 +60,11 @@ fn validate_allows_literal_temp_redirect_and_tee_targets() {
 
 #[test]
 fn validate_blocks_redirects_and_piped_tee_into_project_root() {
-    let root = std::env::current_dir().expect("test cwd");
+    // #1778: the test supplies both sides of the comparison (this path is passed
+    // as `project_root` below), so it needs *a* real absolute directory, not the
+    // process cwd — which other tests mutate via `set_current_dir` while this one
+    // runs in parallel.
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let target = root.join("agent-test.log");
     let target = target.to_string_lossy();
     let paths = crate::core::config::default_shell_write_allow_paths();

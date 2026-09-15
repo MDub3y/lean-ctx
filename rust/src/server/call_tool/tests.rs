@@ -424,10 +424,11 @@ mod shell_outcome_tests {
 
     #[cfg(not(windows))]
     fn shell_context() -> ToolContext {
-        let cwd = std::env::current_dir()
-            .expect("current directory")
-            .to_string_lossy()
-            .into_owned();
+        // #1778: a compile-time constant, not the process cwd. These tests only
+        // need *some* real directory, but `std::env::current_dir()` is
+        // process-global and other tests mutate it via `set_current_dir`, so
+        // reading it here raced with them under `cargo test`'s parallelism.
+        let cwd = env!("CARGO_MANIFEST_DIR").to_string();
         let mut session = crate::core::session::SessionState::new();
         session.project_root = Some(cwd.clone());
         session.shell_cwd = Some(cwd.clone());
@@ -473,10 +474,9 @@ mod shell_outcome_tests {
         raw: bool,
         inline: bool,
     ) -> CallToolResult {
-        let root = std::env::current_dir()
-            .expect("current directory")
-            .to_string_lossy()
-            .into_owned();
+        // #1778: compile-time constant, not the process-global cwd (see
+        // `shell_context` above).
+        let root = env!("CARGO_MANIFEST_DIR").to_string();
         let server = crate::tools::LeanCtxServer::new_with_project_root(Some(&root));
         let mut args = serde_json::Map::new();
         args.insert("background_action".to_string(), serde_json::json!("status"));
@@ -976,10 +976,9 @@ mod shell_outcome_tests {
             Some(crate::server::background_shell::JobState::Completed { .. })
         ));
 
-        let root = std::env::current_dir()
-            .expect("current directory")
-            .to_string_lossy()
-            .into_owned();
+        // #1778: compile-time constant, not the process-global cwd (see
+        // `shell_context` above).
+        let root = env!("CARGO_MANIFEST_DIR").to_string();
         let server = crate::tools::LeanCtxServer::new_with_project_root(Some(&root));
         let mut args = serde_json::Map::new();
         args.insert("background_action".to_string(), serde_json::json!("status"));
@@ -1027,10 +1026,9 @@ mod shell_outcome_tests {
             "printf 'coding coding_fix {KEEP}\\n'; yes '// unrelated {DROP}' | head -n 80"
         ));
 
-        let root = std::env::current_dir()
-            .expect("current directory")
-            .to_string_lossy()
-            .into_owned();
+        // #1778: compile-time constant, not the process-global cwd (see
+        // `shell_context` above).
+        let root = env!("CARGO_MANIFEST_DIR").to_string();
         let server = crate::tools::LeanCtxServer::new_with_project_root(Some(&root));
         let session_id = server.session.read().await.id.clone();
         let context = crate::core::decision_loop_runtime::DecisionLoopRuntime::get_or_init()
