@@ -348,6 +348,14 @@ jobs:
       # of a stale version). Runs on every push/PR — not just at release.
       - name: Check npm package ↔ engine version coupling
         run: python3 scripts/check-package-versions.py
+      # Same idea, one repository further out: the Agent Tools SDK commit that
+      # release.yml pins must declare support for *this* engine version, or the
+      # release build matrix fails on every leg after compiling. Cheap, so it
+      # runs on every push/PR rather than only at release.
+      - name: Check engine ↔ Agent-Tools-SDK coupling
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-sdk-engine-coupling.py
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

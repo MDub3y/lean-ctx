@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — the release gate now checks the Agent-Tools-SDK coupling before building
+
+- **v3.10.2's first release run failed on all nine build legs** with `SDK Engine
+  version constant does not match the release gate`. `release.yml` checks out
+  `Thinkery-AG/leanctx-sdk` at a pinned commit and runs its
+  `verify_agent_context_e2e.py` against every built engine; that script's first
+  line compares the release version with the SDK's
+  `SUPPORTED_AGENT_TOOLS_ENGINE_VERSION`. The pin still pointed at a commit
+  declaring 3.10.1. Nothing local could see it — the coupling lives in another
+  repository — and it only surfaced after ~15 minutes of CI, once each leg had
+  already compiled a full release binary. Nothing was published.
+- New `scripts/check-sdk-engine-coupling.py` reads the pin out of `release.yml`,
+  fetches that exact commit's constant and compares it with `rust/Cargo.toml`.
+  About a second, no SDK checkout needed. It is wired in three places: the
+  always-on section of `preflight.sh` (so a local `git push` refuses before the
+  tag exists), the `pi-extension` job in `ci.yml` next to the npm coupling
+  check, and `release.yml`'s `delivery-gate` — so a future mismatch fails the
+  release in seconds, before the build matrix starts. When GitHub is
+  unreachable the gate reports a *skip*, never a pass.
+- The SDK pin moves to `4aba1456278f` (leanctx-sdk #18), which declares 3.10.2.
+
 ## [3.10.2] — 2026-09-16
 
 ### Fixed — a transient file lock no longer looks like a content change (#1780)
