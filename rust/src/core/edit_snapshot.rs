@@ -271,4 +271,57 @@ mod tests {
         assert_eq!(content.matches("println!(\"hello\")").count(), 1);
         assert_eq!(content.matches("nonexistent").count(), 0);
     }
+
+    /// #1780: `validate_inner` compares the on-disk mtime against the stored
+    /// snapshot's before it hashes anything, and `file_mtime` now retries a
+    /// transient failure instead of collapsing it into `None` — which used to
+    /// make a perfectly valid snapshot look like an edit conflict.
+    ///
+    /// Added together with that change: this path had **no** coverage, so a
+    /// green suite said nothing about it in either direction. The tests above
+    /// all use paths that never exist, which exercises only the `None` case.
+    #[test]
+    fn validate_accepts_an_untouched_file_and_rejects_a_changed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edit.rs");
+        std::fs::write(&path, b"fn main() {}").unwrap();
+        let path_str = path.to_str().unwrap();
+
+        let mut store = EditSnapshotStore::default();
+        let digest = store.store_inner(path_str, b"fn main() {}");
+        assert!(
+            store.validate_inner(path_str, &digest),
+            "an untouched file must validate against its own snapshot"
+        );
+
+        // Distinct mtime: coarse-granularity filesystems (HFS+ 1s, FAT 2s)
+        // would otherwise report the rewrite as the same instant, and the
+        // content hash — not the mtime — would be doing all the work.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"fn main() { changed(); }").unwrap();
+        assert!(
+            !store.validate_inner(path_str, &digest),
+            "a changed file must not validate against the old snapshot"
+        );
+    }
+
+    /// A deleted file must fail validation at once. This is what the `NotFound`
+    /// exemption in the retry buys: no backoff spent waiting for a verdict that
+    /// cannot change.
+    #[test]
+    fn validate_rejects_a_deleted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.rs");
+        std::fs::write(&path, b"content").unwrap();
+        let path_str = path.to_str().unwrap();
+
+        let mut store = EditSnapshotStore::default();
+        let digest = store.store_inner(path_str, b"content");
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(
+            !store.validate_inner(path_str, &digest),
+            "a deleted file cannot validate"
+        );
+    }
 }
