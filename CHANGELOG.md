@@ -5,6 +5,87 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — a transient file lock no longer looks like a content change (#1780)
+
+- **`is_cache_entry_stale_verified` conflated "the content changed" with "we
+  could not check".** All three filesystem calls on the staleness path treated
+  any failure as evidence of a change: `file_mtime` collapses every error into
+  `None`, which `is_cache_entry_stale` then reads as a change; `std::fs::metadata`
+  bailed out via `let Ok(..) else { return true }`; and `std::fs::read` via
+  `Err(_) => true`. On Windows a file can still be held by a writer's handle
+  moments after the write, so the check failed transiently and `ctx_read`
+  re-delivered a full body instead of the `[unchanged]` stub — the
+  non-determinism behind the flaky test in #1779.
+- All three now retry briefly (3 attempts, 15 ms apart) before giving up.
+  `NotFound` is exempt: a deleted file is a *real* change and is still reported
+  at once, with no retry delay.
+- **Side effect, deliberate:** `file_mtime` also backs `edit_snapshot`, where a
+  transient `None` made a stored snapshot look invalid and reported an edit
+  conflict that was not one. That path gets the same benefit. Its content check
+  (`Err(_) => false`) is left alone — there `false` means "could not confirm",
+  which is a safety gate rather than a staleness verdict, and must stay
+  fail-closed.
+- That side effect landed on a path with **no test coverage at all**:
+  `edit_snapshot`'s seven existing tests use paths that never exist, so they
+  only ever exercised the `None` branch. Two tests were added with this change —
+  an untouched file must validate, a changed one must not, and a deleted one
+  must fail at once — because changing behaviour on an unobserved path and
+  pointing at a green suite proves nothing about it.
+- **The fail-closed guarantee is unchanged.** Content that never becomes
+  readable is still declared stale, so a wrong `[unchanged]` stub remains
+  impossible — the doc comment's promise ("serving a stub for changed content
+  would silently mislead the agent") still holds. What the retry removes is the
+  waste and the non-determinism, never the safety.
+- Retrying on every kind except `NotFound` is deliberate. Windows reports a
+  briefly-held file as `ERROR_SHARING_VIOLATION` or `ERROR_ACCESS_DENIED`
+  depending on the holder, and their mapping onto `ErrorKind` is not something
+  this crate can pin down from a POSIX host; enumerating kinds would be brittle
+  for no benefit, since the worst case is ~30 ms on a file that really is gone.
+- The retry loop that #1779 added to the test is **kept**. It guards against
+  other transient causes and costs nothing when the product path already
+  succeeds.
+
+### Hardened — an unanswered `roots/list` could wedge every tool (#1783, cause unproven)
+
+- **`resolve_roots_once` awaited `peer.list_roots()` with no timeout.** rmcp
+  generates `Peer::list_roots` from its `method!(peer_req …)` arm, which calls
+  `send_request` — and that passes `PeerRequestOptions::no_options()`, i.e.
+  `timeout: None`. rmcp offers a `peer_req_with_timeout` variant (it uses it for
+  `create_elicitation`) and does not use it here, so the await never returns on
+  its own if the client stops answering.
+- That matters *in this position specifically*: `resolve_roots_once` runs in
+  `call_tool_guarded`'s pre-dispatch stage, before the handler watchdog, which
+  only covers dispatch itself. A probe that never returns therefore stalls every
+  later tool call — `ctx_read` and `ctx_search` included — with no deadline able
+  to reclaim it and no recovery short of restarting the process.
+- The probe now has a 10-second budget: far above a healthy reply (the client
+  answers from a capability list it already holds) and far below the ~120s an
+  MCP host allows one tool call. A timeout consumes the same three-attempt
+  retry budget as a transport error, so an unresponsive client costs at most
+  three probes per session.
+- The peer handle is now cloned and the `self.peer` read lock released *before*
+  the await. Previously the lock was held across it, so a hung probe also
+  blocked every writer.
+
+  **What is proven and what is not.** Proven: this path can hang indefinitely,
+  and doing so would produce exactly the reported symptom — every `ctx_*` call
+  returning `-32001` until restart, with no self-recovery. Not proven: that this
+  is what happened to the reporter. #1781 carries no evidence naming
+  `roots/list`, and the wedge could not be reproduced on a POSIX host. #1783
+  therefore stays **open**.
+
+  **No regression test.** The repository has no in-process `Peer` harness, so
+  there is no way to assert this without building one; claiming a test here
+  would be worse than admitting its absence. The change is a strict narrowing —
+  a bounded wait replacing an unbounded one — and the existing suite covers that
+  it did not break the success path.
+
+  **A second candidate, deliberately left alone.** `check_idle_expiry` takes
+  `last_call`, `session` and `cache` with no timeout at all, while
+  `call_tool_guarded` wraps *the same* cache write lock in a 5-second timeout.
+  That asymmetry is recorded in #1783 rather than changed here: without evidence
+  that it fired, tightening it would be a guess.
+
 ### Fixed — quoted Windows paths and Windows pipe-close panics (#1781)
 
 - **The allowlist tokenizer dropped every backslash in a double-quoted path.**

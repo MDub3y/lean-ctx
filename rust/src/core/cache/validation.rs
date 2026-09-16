@@ -183,7 +183,12 @@ fn snapshot_from(counters: &ReuseCounters) -> ReuseSnapshot {
 }
 
 pub fn file_mtime(path: &str) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+    // #1780: a transient failure here is indistinguishable from "the file is
+    // gone" once it collapses into `None`, and `is_cache_entry_stale` reads
+    // `Some(cached)` against `None` as a change. Retry first; `NotFound` — the
+    // common and meaningful case — is not retried and still returns `None`
+    // immediately.
+    retry_while_transient(|| std::fs::metadata(path).and_then(|m| m.modified())).ok()
 }
 
 pub fn is_cache_entry_stale(path: &str, cached_mtime: Option<SystemTime>) -> bool {
@@ -207,6 +212,45 @@ fn cache_verify_enabled() -> bool {
     std::env::var("LEAN_CTX_CACHE_VERIFY").map_or(true, |v| v != "0")
 }
 
+/// #1780: tells "the file changed" apart from "we could not look at it".
+///
+/// `NotFound` is a real change — the file is gone — and is reported at once.
+/// Every other failure is treated as possibly transient. Enumerating kinds
+/// would be brittle: Windows reports a briefly-held file as
+/// `ERROR_SHARING_VIOLATION` or `ERROR_ACCESS_DENIED` depending on the holder,
+/// and their mapping onto `ErrorKind` is not something this crate can pin down
+/// on a POSIX host. Retrying costs a few milliseconds on a file that really is
+/// unreadable, and the verdict for that case is unchanged: stale.
+fn io_error_may_be_transient(error: &std::io::Error) -> bool {
+    error.kind() != std::io::ErrorKind::NotFound
+}
+
+/// Runs `op`, retrying briefly while it fails in a way that may be transient.
+///
+/// The fail-closed guarantee is untouched: when every attempt fails the caller
+/// still treats the entry as stale, so a wrong `[unchanged]` stub remains
+/// impossible. What this removes is the *non-determinism* — on Windows a file
+/// can still be locked moments after a write, which made the stub path
+/// re-deliver content that had not changed (#1780).
+fn retry_while_transient<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    const ATTEMPTS: usize = 3;
+    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(15);
+
+    let mut result = op();
+    for _ in 1..ATTEMPTS {
+        match result {
+            Err(ref error) if io_error_may_be_transient(error) => {
+                std::thread::sleep(BACKOFF);
+                result = op();
+            }
+            // Success, or a failure that says something definite (`NotFound`):
+            // either way there is nothing a retry would tell us.
+            _ => return result,
+        }
+    }
+    result
+}
+
 /// Staleness with content verification: like [`is_cache_entry_stale`], but when
 /// the mtime claims "unchanged", additionally compares the md5 of the on-disk
 /// content against the cached hash.
@@ -221,6 +265,14 @@ fn cache_verify_enabled() -> bool {
 /// Note: entries whose stored content differs from disk by design (e.g. secret
 /// redaction) hash differently and therefore never serve stubs — conservative
 /// and correct.
+///
+/// #1780: both filesystem calls below retry briefly before giving up, so a
+/// transient lock is not mistaken for a content change. The mtime probe that
+/// runs first is covered too — [`file_mtime`] retries in the same way — so all
+/// three filesystem touches on this path share the behaviour. An unreadable
+/// file is still declared stale — that verdict is never *wrong*, only wasteful
+/// — but it no longer happens for a file that merely had a writer's handle open
+/// a moment ago.
 pub fn is_cache_entry_stale_verified(
     path: &str,
     cached_mtime: Option<SystemTime>,
@@ -236,13 +288,13 @@ pub fn is_cache_entry_stale_verified(
         return mtime_stale;
     }
 
-    let Ok(meta) = std::fs::metadata(path) else {
+    let Ok(meta) = retry_while_transient(|| std::fs::metadata(path)) else {
         return true;
     };
     if meta.len() > VERIFY_HASH_CAP_BYTES {
         return mtime_stale;
     }
-    match std::fs::read(path) {
+    match retry_while_transient(|| std::fs::read(path)) {
         Ok(bytes) => compute_md5(&String::from_utf8_lossy(&bytes)) != cached_hash,
         Err(_) => true,
     }
@@ -369,6 +421,60 @@ mod tests {
 
         let stale = super::is_cache_entry_stale_verified(p.to_str().unwrap(), Some(mtime), &hash);
         assert!(!stale, "unchanged file must not be stale");
+    }
+
+    /// #1780: a verification read that fails once and then succeeds must not be
+    /// reported as a content change. On Windows a file can still be locked
+    /// moments after a write, which made the stub path non-deterministic.
+    ///
+    /// This exercises the retry itself, not the platform: a real sharing
+    /// violation cannot be produced on a POSIX host.
+    #[test]
+    fn a_transient_failure_is_retried_before_giving_up() {
+        let attempts = std::cell::Cell::new(0_u32);
+        let result = super::retry_while_transient(|| {
+            let n = attempts.get() + 1;
+            attempts.set(n);
+            if n < 3 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "file is locked by another handle",
+                ))
+            } else {
+                Ok(42_u32)
+            }
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts.get(), 3, "must keep trying until it succeeds");
+    }
+
+    /// A missing file is a *real* change, not a transient failure — reporting it
+    /// immediately matters, because retrying would delay every genuine deletion.
+    #[test]
+    fn a_missing_file_is_not_retried() {
+        let attempts = std::cell::Cell::new(0_u32);
+        let result: std::io::Result<()> = super::retry_while_transient(|| {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1, "NotFound must not be retried");
+    }
+
+    /// The fail-closed guarantee is unchanged by #1780: content that cannot be
+    /// verified is still treated as stale, so a wrong `[unchanged]` stub stays
+    /// impossible. The retry only removes the *non-determinism*, never the
+    /// safety.
+    #[test]
+    fn content_that_never_becomes_readable_is_still_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("never-existed.txt");
+        let stale = super::is_cache_entry_stale_verified(
+            missing.to_str().unwrap(),
+            Some(std::time::SystemTime::now()),
+            &super::compute_md5("whatever was cached"),
+        );
+        assert!(stale, "unverifiable content must stay fail-closed");
     }
 
     #[test]
