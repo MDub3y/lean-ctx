@@ -248,8 +248,18 @@ if [[ "$LEVEL" = "full" ]]; then
   # Entrypoint + rules-drift smoke gates (#902/#903). Integration tests, so they
   # build the bin — kept out of `fast` (which deliberately avoids test builds);
   # CI runs them unconditionally via `cargo test --all-features`.
-  step "Entrypoint + rules drift (#902/#903)" \
-    env RUSTFLAGS=-Dwarnings cargo test --all-features --test entrypoints_wired --test rules_drift
+  #
+  # Both became modules of the merged harness (`tests/main.rs` → `suite/`) in
+  # #1146 and stopped being standalone `--test` targets. This step kept naming
+  # them as targets, so it failed with "no test target named entrypoints_wired"
+  # from then on: `preflight.sh full` could not go green and the #902/#903 gate
+  # never actually ran. Filter by module path against the merged binary instead
+  # — one `step` each, because `cargo test` accepts a single filter argument.
+  step "Entrypoint wiring (#902)" \
+    env RUSTFLAGS=-Dwarnings cargo test --all-features --test main suite::entrypoints_wired
+
+  step "Rules drift (#903)" \
+    env RUSTFLAGS=-Dwarnings cargo test --all-features --test main suite::rules_drift
 fi
 
 # ── No-test policy (#849) ─────────────────────────────────────────────

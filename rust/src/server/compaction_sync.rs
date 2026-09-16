@@ -54,7 +54,12 @@ pub fn sync_if_compacted(cache: &mut SessionCache, data_dir: &Path) -> bool {
     // crash window can't resurrect a pre-compaction stub.
     crate::core::read_stub_index::reset_in_dir(data_dir);
     if reset_count > 0 {
-        eprintln!(
+        // #1781: `eprintln!` panics when the write fails, and a host closing the
+        // pipe is routine for an MCP server (restart, aborted call, IDE reload).
+        // On Windows that surfaced as `failed printing to stderr: The pipe is
+        // being closed. (os error 232)`. `tracing` returns the error instead of
+        // panicking, and the subscriber already targets stderr.
+        tracing::info!(
             "[lean-ctx] compaction detected — reset {reset_count} delivery flags for re-read"
         );
     }

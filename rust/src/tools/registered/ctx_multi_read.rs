@@ -213,6 +213,7 @@ mod tests {
             path_errors: std::collections::HashMap::new(),
             bm25_cache: None,
             progress_sender: None,
+            cancel: None,
         }
     }
 

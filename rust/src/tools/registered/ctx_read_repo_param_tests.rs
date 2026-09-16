@@ -56,6 +56,7 @@ async fn repo_param_resolves_against_repo_root_no_cache_collision() {
         path_errors: std::collections::HashMap::new(),
         bm25_cache: None,
         progress_sender: None,
+        cancel: None,
     };
 
     let args_a = json!({ "repo": alias_a, "path": "shared.rs", "mode": "full" })
@@ -122,6 +123,7 @@ async fn repo_param_unknown_alias_errors_with_known_aliases() {
         path_errors: std::collections::HashMap::new(),
         bm25_cache: None,
         progress_sender: None,
+        cancel: None,
     };
 
     let args = json!({ "repo": "this-alias-does-not-exist", "path": "x.rs", "mode": "full" })

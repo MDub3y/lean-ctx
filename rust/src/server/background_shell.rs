@@ -196,6 +196,7 @@ pub fn run_foreground_or_detach(
     timeout_ms: Option<u64>,
     soft_cap: Duration,
     on_tick: Option<&dyn Fn(Duration)>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> ForegroundResult {
     let id = start(command, cwd, extra_env, timeout_ms);
     let started = Instant::now();
@@ -218,6 +219,18 @@ pub fn run_foreground_or_detach(
                 };
             }
             _ => {}
+        }
+        // #1781: when the host abandons the call, free this thread immediately.
+        // The foreground wait runs on the blocking pool — dispatch hands the
+        // handler to `spawn_blocking`, and that pool has
+        // `(workers * 4).clamp(8, 32)` slots. Without this check the loop spun
+        // on until `soft_cap` — five minutes for a `timeout_ms: 300_000` call —
+        // so a burst of abandoned commands could occupy every slot, after which
+        // subsequent tool calls queued behind them until the server restarted.
+        // Detaching rather than killing keeps the job alive under its id, which
+        // the caller already knows how to poll and cancel.
+        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return ForegroundResult::Detached { job_id: id };
         }
         let now = Instant::now();
         if now >= deadline {
@@ -365,6 +378,7 @@ mod tests {
             Some(10_000),
             Duration::from_secs(10),
             None,
+            None,
         );
         match result {
             ForegroundResult::Finished { output, exit_code } => {
@@ -384,6 +398,7 @@ mod tests {
             std::collections::HashMap::default(),
             Some(10_000),
             Duration::from_millis(100),
+            None,
             None,
         );
         let ForegroundResult::Detached { job_id } = result else {
@@ -408,6 +423,7 @@ mod tests {
             std::collections::HashMap::default(),
             Some(600_000),
             Duration::from_millis(100),
+            None,
             None,
         );
         let ForegroundResult::Detached { job_id } = result else {
@@ -435,6 +451,7 @@ mod tests {
             Some(60_000),
             TICK + Duration::from_millis(500),
             Some(&tick),
+            None,
         );
         let ForegroundResult::Detached { job_id } = result else {
             panic!("slow command should detach");
@@ -444,6 +461,36 @@ mod tests {
             ticks.load(std::sync::atomic::Ordering::Relaxed) >= 1,
             "no progress reported during a {}s+ foreground wait",
             TICK.as_secs()
+        );
+    }
+
+    /// #1781: a client-side cancellation must free the waiting thread long
+    /// before the soft cap. The assertion is on *elapsed time*, not just on the
+    /// `Detached` shape — detaching at the cap returns the same variant, so the
+    /// shape alone would pass even with the check removed.
+    #[test]
+    #[cfg_attr(windows, ignore)]
+    fn cancelled_token_detaches_without_waiting_for_the_soft_cap() {
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let started = std::time::Instant::now();
+        let result = run_foreground_or_detach(
+            "sleep 30".to_string(),
+            ".".to_string(),
+            std::collections::HashMap::default(),
+            Some(60_000),
+            Duration::from_mins(1),
+            None,
+            Some(&token),
+        );
+        let elapsed = started.elapsed();
+        let ForegroundResult::Detached { job_id } = result else {
+            panic!("a cancelled request must detach instead of waiting it out");
+        };
+        cancel(&job_id);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancelled wait took {elapsed:?} against a one-minute cap — token not observed"
         );
     }
 

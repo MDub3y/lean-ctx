@@ -331,6 +331,13 @@ impl LeanCtxServer {
                 path_errors,
                 bm25_cache: Some(self.bm25_cache.clone()),
                 progress_sender: Some(self.progress_sender.clone()),
+                // #1781: the request's cancellation token, scoped per request by
+                // `call_tool`. `try_with` yields `None` outside such a scope —
+                // unit tests and internal dispatch paths — which leaves their
+                // behaviour exactly as it was.
+                cancel: crate::server::tool_trait::REQUEST_CT
+                    .try_with(tokio_util::sync::CancellationToken::clone)
+                    .ok(),
             };
             // Run the (synchronous) handler on the dedicated blocking pool under
             // a watchdog deadline (#271). `block_in_place` would pin one of the

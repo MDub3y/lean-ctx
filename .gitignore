@@ -65,6 +65,12 @@ rust/lean-ctx-report.html
 # ── Generated / worktrees (local) ──
 website/
 .worktrees/
+# Per-worktree CARGO_TARGET_DIR. Parallel worktrees need their own target dir to
+# avoid fighting over one build lock; `target/` above does not match it (the name
+# only contains "target", it does not end in it), so these trees were untracked
+# but not ignored — ~25k artifacts one `git add -A` away from a commit, and
+# counted as "changed files" by preflight's change classification.
+.ctarget/
 AGENTS.md.lean-ctx.*.bak
 docs/gpt/
 

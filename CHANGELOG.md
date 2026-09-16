@@ -5,6 +5,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — quoted Windows paths and Windows pipe-close panics (#1781)
+
+- **The allowlist tokenizer dropped every backslash in a double-quoted path.**
+  `Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"` tokenized
+  as `C:Program FilesDockerDockerDocker Desktop.exe`, so the guard refused a
+  fragment that was never a command and asked the user to report it. The escape
+  arm consumed `\` unconditionally outside single quotes; POSIX 2.2.3 says a
+  backslash inside double quotes is literal unless it precedes `$`, `` ` ``,
+  `"`, `\` or a newline — so this was wrong for POSIX shells too, not only for
+  Windows paths. Unquoted escapes are unchanged.
+- **A routine pipe close was logged as a crash on Windows.** The panic hook
+  suppressed only the POSIX wording, `Broken pipe`. Windows reports
+  `The pipe is being closed. (os error 232)` (`ERROR_NO_DATA`) or `os error 109`
+  (`ERROR_BROKEN_PIPE`), so every host restart, aborted call or IDE reload left
+  a crash entry — ten-plus of them in the report that prompted this. The
+  predicate is now a named function with the platform wordings pinned by test,
+  since the Windows payloads cannot be produced on a POSIX host.
+- **`compaction_sync` printed through `eprintln!` on the MCP server path.**
+  `eprintln!` panics when the write fails, which is precisely what a closed pipe
+  does; it now logs through `tracing`, which returns the error instead. The
+  subscriber already targets stderr, so the output is unchanged.
+- **An abandoned `ctx_shell` call held its blocking-pool slot until its own soft
+  cap.** When a client cancels a request, `call_tool` already notices — but only
+  once the tool *returns* (#1265), so a foreground wait of up to five minutes
+  (`timeout_ms: 300_000`) kept running with nobody left to answer. The wait loop
+  now observes the request's cancellation token and detaches, leaving the job
+  alive under its `shell_*` id so the caller can still poll or cancel it. The
+  token reaches the handler through a task-local scoped by `call_tool`, not a
+  field on the shared server: rmcp spawns one task per request with its own
+  child token, so a shared field would let one call cancel another's command.
+  `ctx_shell` and `ctx_execute` stay exempt from the dispatch watchdog by
+  design — they run arbitrary user commands and enforce their own limits — so
+  cancellation, not a deadline, is what frees the slot.
+
+  **Scope of the evidence:** the regression test asserts that a cancelled token
+  ends a 60-second wait in well under five seconds, measured on elapsed time
+  rather than on the return variant (detaching at the cap returns the same
+  variant). It does not reproduce the reported Windows wedge, which could not be
+  triggered on a POSIX host.
+
+  **What this does not cover.** The report describes a second wedge with no long
+  command before it — the preceding call finished in 26 ms — and says plainly
+  that the long foreground command "may be one trigger, not the only one". That
+  occurrence is unexplained by this change. The report also asks for the child
+  *process group* to be killed and reaped on cancellation; this change detaches
+  instead, so the command keeps running under its `shell_*` id and stays
+  pollable. That is deliberate — a build cancelled by an editor reload should not
+  lose its work — but it is not the requested behaviour, and a child that ignores
+  its own `timeout_ms` still occupies a process until that cap. Capping the
+  foreground budget below the host's abort stays with #1173, which the reporter
+  explicitly did not re-litigate here.
+
+### Fixed — `preflight.sh full` could not go green since #1146
+
+- **The #902/#903 gate named test targets that no longer exist.** #1146 merged
+  the integration tests into one harness binary (`tests/main.rs` → `suite/`), so
+  `entrypoints_wired` and `rules_drift` became modules rather than `--test`
+  targets. The gate kept invoking them as targets and has failed with `error: no
+  test target named entrypoints_wired` ever since — which means release-parity
+  runs were guaranteed red and the entrypoint/rules-drift check never actually
+  executed. It now filters by module path against the merged binary, as two
+  separate steps because `cargo test` takes a single filter argument. Both
+  checks pass once invoked (2 + 2 tests). The `pre-push` hook runs the `fast`
+  level, which never reached this block, so pushes were not affected.
+
 ### Fixed — four test races that made CI red without a product defect
 
 - **`ctx_read` stub re-read (#841-ci).** `full_reread_still_serves_stub_when_no_mode_change`
