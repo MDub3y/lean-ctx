@@ -25,6 +25,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   release in seconds, before the build matrix starts. When GitHub is
   unreachable the gate reports a *skip*, never a pass.
 - The SDK pin moves to `4aba1456278f` (leanctx-sdk #18), which declares 3.10.2.
+- The gate is registered as a fourth `version_gates` entry in the delivery
+  evidence contract (`docs/contracts/delivery-evidence-v1.json`) and its
+  verifier, alongside the release-tag, SDK-surface and package-version gates —
+  so the contract that pins `release.yml` by digest also names the check that
+  guards it. The two `release.yml` digests move with the workflow change.
 
 ## [3.10.2] — 2026-09-16
 

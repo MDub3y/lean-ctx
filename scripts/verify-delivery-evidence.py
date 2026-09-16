@@ -89,6 +89,7 @@ VERSION_GATES = (
     ("release-tag", "scripts/check-release-tag.py", "def verify_tag(tag: str, root: Path) -> str:", "python3 scripts/check-release-tag.py \"${GITHUB_REF_NAME}\""),
     ("sdk-surface", "scripts/check-sdk-surface.py", "def main() -> int:", "python3 scripts/check-sdk-surface.py"),
     ("package-version", "scripts/check-package-versions.py", "def main() -> int:", "python3 scripts/check-package-versions.py"),
+    ("sdk-engine-coupling", "scripts/check-sdk-engine-coupling.py", "def main(argv: list[str] | None = None) -> int:", "python3 scripts/check-sdk-engine-coupling.py"),
 )
 
 
