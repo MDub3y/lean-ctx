@@ -181,6 +181,15 @@ else
   printf "  ${YELLOW}change classification unavailable (no %s) — running full gate${RESET}\n" "$BASE_REF"
 fi
 
+# Always-on, ~1s: the engine version this tree ships must match the constant in
+# the Agent Tools SDK commit that release.yml pins. That coupling lives in
+# another repository, so nothing else here can see it — and when it breaks, it
+# breaks *after* every one of the nine release build legs has already compiled a
+# full binary. v3.10.2 lost ~15 minutes of CI to exactly that on 2026-09-16.
+# Needs network; reports a skip (not a pass) when GitHub is unreachable.
+step "Engine ↔ Agent-Tools-SDK coupling" \
+  python3 "$REPO_ROOT/scripts/check-sdk-engine-coupling.py"
+
 # Always-on cheap gate: whitespace errors + leftover conflict markers. Checks
 # the pushed range (base..HEAD) when known, else the working tree.
 if [[ -n "$BASE_SHA" ]]; then
