@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.10.2] — 2026-09-16
+
 ### Fixed — a transient file lock no longer looks like a content change (#1780)
 
 - **`is_cache_entry_stale_verified` conflated "the content changed" with "we
